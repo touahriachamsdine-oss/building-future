@@ -1,0 +1,21 @@
+{
+  "name": "منصة بَنّاي | كل ما تحتاجه للبناء في مكان واحد",
+  "short_name": "بَنّاي",
+  "description": "المنصة الرقمية الشاملة لقطاع البناء والتعمير في الجزائر",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0a0a",
+  "theme_color": "#0a0a0a",
+  "icons": [
+    {
+      "src": "/images/logo_symbol.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/images/logo_symbol.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
