@@ -35,6 +35,7 @@ ON CONFLICT (id) DO NOTHING;
     await query(`
 ALTER TABLE bookings ALTER COLUMN provider_id DROP NOT NULL;
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS baladia TEXT;
 `);
 
     return Response.json({ success: true, message: 'Tables created' });
