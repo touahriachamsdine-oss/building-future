@@ -18,6 +18,7 @@ import {
   Tooltip, 
   ResponsiveContainer 
 } from "recharts";
+import { AdminDispatchClient } from "./AdminDispatchClient";
 
 const data = [
   { name: "Sat", users: 4000, listings: 2400 },
@@ -136,6 +137,9 @@ export default function AdminOverview() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Job Request Dispatch — embedded from /admin/dispatch */}
+      <AdminDispatchClient />
     </div>
   );
 }
