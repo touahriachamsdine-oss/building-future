@@ -8,7 +8,7 @@ import NextImage from "next/image";
 import { useState, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "@/lib/utils";
-import { supabase } from "@/lib/supabase";
+import { saveImages, rollbackImages } from "@/app/actions/images";
 import { useRouter } from "next/navigation";
 import { createListing } from "@/lib/db";
 import { WILAYAS } from "@/lib/wilayas";
@@ -44,11 +44,11 @@ export default function NewListingPage() {
     price_type: "fixed",
     condition: "new",
     wilaya: "1",
-    images: [] as string[],
   });
 
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [previews, setPreviews] = useState<string[]>([]);
+  const [publishError, setPublishError] = useState<string | null>(null);
 
   const nextStep = () => setCurrentStep((prev) => Math.min(prev + 1, STEPS.length));
   const prevStep = () => setCurrentStep((prev) => Math.max(prev - 1, 1));
@@ -71,32 +71,11 @@ export default function NewListingPage() {
   };
 
   const uploadImages = async (): Promise<string[]> => {
-    const urls: string[] = [];
     setUploading(true);
-    
     try {
-      for (const file of selectedFiles) {
-        const fileExt = file.name.split('.').pop();
-        const fileName = `${Math.random()}.${fileExt}`;
-        const filePath = `listings/${fileName}`;
-
-        const { error } = await supabase.storage
-          .from('listings')
-          .upload(filePath, file);
-
-        if (error) throw error;
-
-        const { data: { publicUrl } } = supabase.storage
-          .from('listings')
-          .getPublicUrl(filePath);
-
-        urls.push(publicUrl);
-      }
-      return urls;
-    } catch (err) {
-      console.error("Storage upload error:", err);
-      // Fallback: if bucket doesn't exist or error, return empty
-      return [];
+      const res = await saveImages(selectedFiles, 'listings');
+      if (!res.ok) throw new Error(res.error);
+      return res.urls;
     } finally {
       setUploading(false);
     }
@@ -104,9 +83,11 @@ export default function NewListingPage() {
 
   const handlePublish = async () => {
     setIsLoading(true);
+    setPublishError(null);
+    let imageUrls: string[] = [];
     try {
-      // Upload images first
-      const imageUrls = await uploadImages();
+      // Upload images first — if this fails, abort so we never publish an empty listing
+      imageUrls = await uploadImages();
 
       await createListing({
         title: formData.title,
@@ -117,13 +98,24 @@ export default function NewListingPage() {
         price_type: formData.price_type,
         condition: (formData.category === 'MATERIAL' || formData.category === 'EQUIPMENT') ? formData.condition : undefined,
         wilaya: parseInt(formData.wilaya),
-        images: imageUrls.length > 0 ? imageUrls : formData.images,
+        images: imageUrls,
       });
 
       router.push('/dashboard/provider/listings');
     } catch (err) {
       console.error(err);
-      alert("حدث خطأ أثناء نشر الإعلان. يرجى التأكد من ملء جميع الحقول.");
+      // The listing insert failed after the bytes were already stored — remove
+      // them so a failed publish does not leave orphaned image rows.
+      if (imageUrls.length > 0) {
+        await rollbackImages(imageUrls).catch((e) =>
+          console.error('[images] rollback failed', e)
+        );
+      }
+      setPublishError(
+        err instanceof Error && err.message
+          ? err.message
+          : "تعذّر نشر الإعلان. حاول مجدداً."
+      );
     } finally {
       setIsLoading(false);
     }
@@ -346,7 +338,7 @@ export default function NewListingPage() {
              </motion.div>
            </AnimatePresence>
         </CardContent>
-        <div className="px-6 md:px-10 py-6 bg-secondary border-t border-border flex justify-between items-center">
+        <div className="px-6 md:px-10 py-6 bg-secondary border-t border-border flex justify-between items-center gap-4">
            <Button 
              variant="ghost" 
              onClick={prevStep}
@@ -355,21 +347,28 @@ export default function NewListingPage() {
            >
               السابق
            </Button>
-           <Button 
-             variant="brutal" 
-             onClick={currentStep === 4 ? handlePublish : nextStep}
-             disabled={isLoading || uploading}
-             className="flex gap-2 min-w-[140px]"
-           >
-              {isLoading || uploading ? (
-                <Loader2 className="animate-spin" />
-              ) : (
-                <>
-                  {currentStep === 4 ? "نشر الإعلان" : "المتابعة"}
-                  <ChevronRight size={18} className="rotate-180" />
-                </>
+           <div className="flex flex-col items-end gap-2">
+              {publishError && (
+                <p role="alert" className="text-xs font-bold text-rose-500 text-right max-w-xs">
+                  {publishError}
+                </p>
               )}
-           </Button>
+              <Button 
+                variant="brutal" 
+                onClick={currentStep === 4 ? handlePublish : nextStep}
+                disabled={isLoading || uploading}
+                className="flex gap-2 min-w-[140px]"
+              >
+                  {isLoading || uploading ? (
+                    <Loader2 className="animate-spin" />
+                  ) : (
+                    <>
+                      {currentStep === 4 ? "نشر الإعلان" : "المتابعة"}
+                      <ChevronRight size={18} className="rotate-180" />
+                    </>
+                  )}
+              </Button>
+           </div>
         </div>
       </Card>
     </div>

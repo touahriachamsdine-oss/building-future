@@ -27,7 +27,7 @@ export default function LoginPage() {
           } else if (user.role === 'PROVIDER') {
             router.push('/dashboard/provider');
           } else {
-            router.push('/categories/building-materials');
+            router.push('/listings');
           }
         }
       } catch (err) {
@@ -55,7 +55,7 @@ export default function LoginPage() {
         } else if (res.user.role === 'PROVIDER') {
           router.push('/dashboard/provider');
         } else {
-          router.push('/categories/building-materials');
+          router.push('/listings');
         }
       }
     } catch (err) {

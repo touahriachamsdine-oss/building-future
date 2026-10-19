@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useTransition, useSyncExternalStore } from "react";
+import { useState, useEffect, useRef, useTransition, useSyncExternalStore } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Building2,
@@ -28,6 +28,7 @@ import {
   Shield,
   RefreshCw,
   Briefcase,
+  X,
 } from "lucide-react";
 import Image from "next/image";
 import { WILAYAS, getWilayaName } from "@/lib/wilayas";
@@ -37,6 +38,8 @@ import {
   getAvailableProviders,
   getPendingRequests,
   assignRequestToProvider,
+  declineRequest,
+  cancelDispatch,
 } from "@/lib/db";
 import { useAdminGuard } from "@/lib/use-admin";
 
@@ -100,6 +103,8 @@ export function AdminDispatchClient() {
   const [isPending, startTransition] = useTransition();
   const [sent, setSent]               = useState(false);
   const [error, setError]             = useState<string | null>(null);
+  const [requestsError, setRequestsError] = useState<string | null>(null);
+  const [dataError, setDataError] = useState<string | null>(null);
   const [showHistory, setShowHistory] = useState(true);
   const [refreshKey, setRefreshKey] = useState(0);
   const [activeTab, setActiveTab] = useState<'dispatch' | 'requests'>('dispatch');
@@ -109,12 +114,30 @@ export function AdminDispatchClient() {
     client: { name: string; phone: string | null } | null;
   }[]>([]);
   const [assigning, setAssigning] = useState<string | null>(null);
+  const [targetRequest, setTargetRequest] = useState<{
+    id: string; service_type: string; urgency: string; wilaya: number;
+    notes: string | null; created_at: string;
+    client: { name: string; phone: string | null } | null;
+  } | null>(null);
+  const [pendingConfirm, setPendingConfirm] = useState<{
+    requestId: string; providerId: string; providerName: string;
+    serviceType: string; clientName: string;
+  } | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const pendingResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (pendingResetRef.current) clearTimeout(pendingResetRef.current);
+    };
+  }, []);
 
   // Load providers + history on mount and after every dispatch
   useEffect(() => {
     if (!isAdmin) return;
     const loadData = async () => {
       setLoadingData(true);
+      setDataError(null);
       try {
         const [prov, hist] = await Promise.all([
           getAvailableProviders(
@@ -125,8 +148,11 @@ export function AdminDispatchClient() {
         ]);
         setProviders(prov);
         setHistory(hist);
-      } catch {
-        // silently keep old data on network error
+      } catch (err) {
+        // Keep the previous list visible, but say so — dispatching to a stale
+        // provider list should not look like a freshly loaded one.
+        console.error('[dispatch] failed to refresh providers/history', err);
+        setDataError("تعذّر تحديث قائمة العمال. البيانات المعروضة قد تكون قديمة.");
       } finally {
         setLoadingData(false);
       }
@@ -137,7 +163,20 @@ export function AdminDispatchClient() {
 
   useEffect(() => {
     if (!isAdmin) return;
-    getPendingRequests().then(setPendingRequests);
+    let cancelled = false;
+    getPendingRequests()
+      .then((rows) => {
+        if (cancelled) return;
+        setPendingRequests(rows);
+        setRequestsError(null);
+      })
+      .catch((err) => {
+        console.error('[dispatch] failed to load pending requests', err);
+        // Never leave the list empty on failure: "no pending requests" would
+        // be a false, dangerous claim while requests are still waiting.
+        if (!cancelled) setRequestsError("تعذّر تحميل الطلبات المعلقة. حاول تحديث الصفحة.");
+      });
+    return () => { cancelled = true; };
   }, [mounted, isAdmin, refreshKey]);
 
   const filteredProviders = providers.filter((p) => {
@@ -159,6 +198,9 @@ export function AdminDispatchClient() {
     if (!canSend) return;
     setError(null);
 
+    const workerName =
+      providers.find(p => p.id === selectedWorker)?.name ?? '';
+
     startTransition(async () => {
       try {
         await createDispatchBooking({
@@ -167,28 +209,43 @@ export function AdminDispatchClient() {
           urgency:      selectedUrgency,
           wilaya:       Number(selectedWilaya),
           notes:        notes.trim() || undefined,
+          request_id:   targetRequest?.id,
         });
 
         // Refresh history & providers
         const [prov, hist] = await Promise.all([
-          getAvailableProviders(),
+          getAvailableProviders(selectedService ?? undefined, Number(selectedWilaya) || undefined),
           getDispatchHistory(40),
         ]);
         setProviders(prov);
         setHistory(hist);
 
         setSent(true);
-        setTimeout(() => {
+        setSuccessMessage(
+          targetRequest
+            ? `تم إرسال طلب العميل إلى ${workerName}`
+            : `تم إرسال أمر العمل إلى ${workerName}`
+        );
+        const timer = setTimeout(() => {
           setSent(false);
+          setSuccessMessage(null);
           setSelectedService(null);
           setSelectedWorker(null);
           setSelectedUrgency("normal");
           setSelectedWilaya("");
           setNotes("");
-        }, 2000);
+          setWorkerFilter("");
+          setTargetRequest(null);
+        }, 3000);
+        pendingResetRef.current = timer;
       } catch (err) {
         console.error(err);
-        setError("حدث خطأ أثناء الإرسال. يرجى المحاولة مجدداً.");
+        setError(
+          err instanceof Error && err.message.includes("no longer pending")
+            ? "سبق تعيين هذا الطلب من طرف آخر. تم تحديث القائمة."
+            : "حدث خطأ أثناء الإرسال. يرجى المحاولة مجدداً."
+        );
+        setRefreshKey(k => k + 1);
       }
     });
   };
@@ -218,14 +275,21 @@ export function AdminDispatchClient() {
         </div>
       </div>
 
-      {guardLoading && (
-        <div className="flex justify-center py-20">
-          <Loader2 size={32} className="animate-spin text-[var(--primary)]" />
+      {/* Shared feedback — visible in BOTH tabs so auto-assign failures are never silent */}
+      {error && (
+        <div role="alert" className="bg-red-500/10 border border-red-500/30 text-red-400 rounded-xl px-5 py-3 text-sm text-center font-bold">
+          {error}
         </div>
       )}
+      {successMessage && (
+        <div role="status" className="bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 rounded-xl px-5 py-3 text-sm text-center font-bold">
+          {successMessage}
+        </div>
+      )}
+
       <div className="flex gap-1 bg-[var(--card)] border border-[var(--border)] rounded-2xl p-1.5" dir="rtl">
         <button
-          onClick={() => setActiveTab('dispatch')}
+          onClick={() => { setActiveTab('dispatch'); setError(null); }}
           className={[
             "flex-1 flex items-center justify-center gap-2 py-3 px-5 rounded-xl font-black text-sm transition-all",
             activeTab === 'dispatch'
@@ -237,7 +301,7 @@ export function AdminDispatchClient() {
           إرسال أمر عمل
         </button>
         <button
-          onClick={() => setActiveTab('requests')}
+          onClick={() => { setActiveTab('requests'); setError(null); }}
           className={[
             "flex-1 flex items-center justify-center gap-2 py-3 px-5 rounded-xl font-black text-sm transition-all relative",
             activeTab === 'requests'
@@ -260,6 +324,13 @@ export function AdminDispatchClient() {
 
         {/* ── Left: Dispatch Form ───────────────────────────────── */}
         <div className="xl:col-span-2 space-y-8">
+
+          {dataError && (
+            <div role="alert" className="flex items-center gap-2 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-5 py-3 text-sm font-bold text-amber-600 dark:text-amber-400">
+              <AlertCircle size={16} />
+              {dataError}
+            </div>
+          )}
 
           {/* Step 1 — Service */}
           <div className="bg-[var(--card)] border border-[var(--border)] rounded-2xl p-6 space-y-5">
@@ -474,10 +545,23 @@ export function AdminDispatchClient() {
             )}
           </div>
 
-          {/* Error */}
-          {error && (
-            <div className="bg-red-500/10 border border-red-500/30 text-red-400 rounded-xl px-5 py-3 text-sm text-center">
-              {error}
+          {/* Dispatching an existing customer request */}
+          {targetRequest && (
+            <div className="bg-[var(--primary)]/10 border border-[var(--primary)]/40 rounded-2xl p-4 flex items-center justify-between gap-4">
+              <div className="text-sm">
+                <p className="font-black text-[var(--foreground)]">
+                 dispatching طلب عميل — {SERVICE_MAP[targetRequest.service_type]?.label ?? targetRequest.service_type}
+                </p>
+                <p className="text-xs text-[var(--muted)] mt-0.5">
+                  سيتم تحديث نفس الطلب وإغلاقه، لن يتم إنشاء طلب جديد.
+                </p>
+              </div>
+              <button
+                onClick={() => setTargetRequest(null)}
+                className="text-xs text-[var(--muted)] hover:text-[var(--foreground)] font-bold shrink-0"
+              >
+                إلغاء الربط
+              </button>
             </div>
           )}
 
@@ -558,10 +642,28 @@ export function AdminDispatchClient() {
                           )}
                         </div>
                       </div>
-                      <div className="text-[10px] text-[var(--muted)]">
-                        {mounted ? new Date(item.created_at).toLocaleDateString("ar-DZ", {
-                          day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
-                        }) : "..."}
+                      <div className="text-[10px] text-[var(--muted)] flex flex-col items-end gap-1">
+                        <span>
+                          {mounted ? new Date(item.created_at).toLocaleDateString("ar-DZ", {
+                            day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
+                          }) : "..."}
+                        </span>
+                        {(item.status === "DISPATCHED" || item.status === "IN_PROGRESS") && (
+                          <button
+                            onClick={async () => {
+                              setError(null);
+                              try {
+                                await cancelDispatch(item.id);
+                                setRefreshKey(k => k + 1);
+                              } catch {
+                                setError("حدث خطأ أثناء إلغاء أمر العمل");
+                              }
+                            }}
+                            className="text-red-400 hover:underline font-bold"
+                          >
+                            إلغاء الأمر
+                          </button>
+                        )}
                       </div>
                     </div>
                   );
@@ -575,7 +677,13 @@ export function AdminDispatchClient() {
 
       {activeTab === 'requests' && (
       <div className="space-y-4">
-        {pendingRequests.length === 0 ? (
+        {requestsError ? (
+          <div role="alert" className="rounded-2xl border border-red-500/30 bg-red-500/10 p-8 text-center">
+            <AlertCircle size={36} className="mx-auto text-red-500 mb-3" />
+            <h3 className="text-lg font-black text-[var(--foreground)] mb-2">{requestsError}</h3>
+            <p className="text-sm text-[var(--muted)]">لا يمكن عرض حالة الطلبات الآن. لم يتم تأكيد خلو القائمة.</p>
+          </div>
+        ) : pendingRequests.length === 0 ? (
           <div className="bg-[var(--card)] border border-[var(--border)] rounded-2xl p-12 text-center">
             <Inbox size={48} className="mx-auto text-[var(--muted)] mb-4 opacity-40" />
             <h3 className="text-lg font-black text-[var(--foreground)] mb-2">لا توجد طلبات معلقة</h3>
@@ -599,7 +707,18 @@ export function AdminDispatchClient() {
                       <div>
                         <div className="font-bold text-[var(--foreground)]">{svc?.label ?? req.service_type}</div>
                         {req.client && (
-                          <div className="text-xs text-[var(--muted)] mt-0.5">{req.client.name}</div>
+                          <div className="text-xs text-[var(--muted)] mt-0.5 flex items-center gap-2">
+                            <span>{req.client.name}</span>
+                            {req.client.phone && (
+                              <a
+                                href={`tel:${req.client.phone}`}
+                                dir="ltr"
+                                className="text-[var(--primary)] hover:underline font-bold"
+                              >
+                                {req.client.phone}
+                              </a>
+                            )}
+                          </div>
                         )}
                       </div>
                     </div>
@@ -619,17 +738,26 @@ export function AdminDispatchClient() {
                         day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
                       }) : "..."}
                     </span>
-                    {req.notes && <span className="truncate max-w-[200px]">{req.notes}</span>}
                   </div>
+
+                  {/* Customer notes get their own full-width line so long Arabic
+                      text is never clipped mid-word. */}
+                  {req.notes && (
+                    <p className="text-xs text-[var(--muted)] bg-[var(--secondary)] rounded-lg p-3 leading-relaxed whitespace-pre-wrap break-words">
+                      {req.notes}
+                    </p>
+                  )}
 
                   <div className="flex gap-2 pt-2 border-t border-[var(--border)]">
                     <button
                       onClick={() => {
                         setActiveTab('dispatch');
+                        setError(null);
                         if (svc) setSelectedService(svc.id);
                         setSelectedUrgency(req.urgency);
                         setSelectedWilaya(req.wilaya);
                         setNotes(req.notes ?? "");
+                        setTargetRequest(req);
                       }}
                       className="flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl bg-[var(--primary)] text-[var(--primary-foreground)] font-bold text-sm hover:opacity-90 transition-all"
                     >
@@ -640,18 +768,25 @@ export function AdminDispatchClient() {
                       disabled={assigning === req.id}
                       onClick={async () => {
                         setAssigning(req.id);
+                        setError(null);
                         try {
-                          // Auto-assign to any available provider with matching specialty
                           const providers = await getAvailableProviders(req.service_type, req.wilaya);
                           const available = providers.find(p => p.available);
-                          if (available) {
-                            await assignRequestToProvider(req.id, available.id);
-                            setRefreshKey(k => k + 1);
-                          } else {
+                          if (!available) {
                             setError("لا يوجد عمال متاحون لهذه الخدمة");
+                            return;
                           }
+                          // Ask before assigning — the worker is notified immediately
+                          // and there is no undo from the worker side.
+                          setPendingConfirm({
+                            requestId: req.id,
+                            providerId: available.id,
+                            providerName: available.name,
+                            serviceType: req.service_type,
+                            clientName: req.client?.name ?? '',
+                          });
                         } catch {
-                          setError("حدث خطأ أثناء التعيين التلقائي");
+                          setError("حدث خطأ أثناء جلب العمال المتاحين");
                         } finally {
                           setAssigning(null);
                         }
@@ -665,6 +800,25 @@ export function AdminDispatchClient() {
                       )}
                       تعيين تلقائي
                     </button>
+                    <button
+                      disabled={assigning === req.id}
+                      onClick={async () => {
+                        setAssigning(req.id);
+                        setError(null);
+                        try {
+                          await declineRequest(req.id);
+                          setRefreshKey(k => k + 1);
+                        } catch {
+                          setError("حدث خطأ أثناء رفض الطلب");
+                        } finally {
+                          setAssigning(null);
+                        }
+                      }}
+                      className="flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl border border-red-500/30 text-red-400 font-bold text-sm hover:bg-red-500/10 transition-all disabled:opacity-50"
+                    >
+                      <X size={14} />
+                      رفض
+                    </button>
                   </div>
                 </div>
               );
@@ -673,6 +827,68 @@ export function AdminDispatchClient() {
         )}
       </div>
       )}
+
+      {/* ── Auto-assign confirmation ─────────────────────────────── */}
+      <AnimatePresence>
+        {pendingConfirm && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4"
+            onClick={() => setPendingConfirm(null)}
+          >
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-label="تأكيد التعيين"
+              onClick={(e) => e.stopPropagation()}
+              className="bg-[var(--card)] border border-[var(--border)] rounded-2xl p-6 max-w-md w-full space-y-4"
+            >
+              <h3 className="font-black text-[var(--foreground)] text-lg">تأكيد تعيين العامل</h3>
+              <p className="text-sm text-[var(--muted)] leading-relaxed">
+                سيتم إشعار <span className="font-bold text-[var(--foreground)]">{pendingConfirm.providerName}</span> فوراً
+                ويعمل على طلب <span className="font-bold text-[var(--foreground)]">{SERVICE_MAP[pendingConfirm.serviceType]?.label ?? pendingConfirm.serviceType}</span>
+                {pendingConfirm.clientName && <> للعميل {pendingConfirm.clientName}</>}. هل تريد المتابعة؟
+              </p>
+              <div className="flex gap-3 pt-2">
+                <button
+                  onClick={async () => {
+                    const target = pendingConfirm;
+                    setPendingConfirm(null);
+                    setAssigning(target.requestId);
+                    setError(null);
+                    try {
+                      await assignRequestToProvider(target.requestId, target.providerId);
+                      setSuccessMessage(`تم تعيين الطلب إلى ${target.providerName}`);
+                      setRefreshKey(k => k + 1);
+                    } catch (err) {
+                      console.error(err);
+                      setError(
+                        err instanceof Error && err.message.includes("سبق تعيين")
+                          ? err.message
+                          : "حدث خطأ أثناء التعيين"
+                      );
+                      setRefreshKey(k => k + 1);
+                    } finally {
+                      setAssigning(null);
+                    }
+                  }}
+                  className="flex-1 py-3 rounded-xl bg-[var(--primary)] text-[var(--primary-foreground)] font-bold text-sm hover:opacity-90 transition-all"
+                >
+                  تأكيد الإرسال
+                </button>
+                <button
+                  onClick={() => setPendingConfirm(null)}
+                  className="px-6 py-3 rounded-xl border border-[var(--border)] text-[var(--muted)] font-bold text-sm hover:bg-[var(--secondary)] transition-all"
+                >
+                  إلغاء
+                </button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
     </div>
   );

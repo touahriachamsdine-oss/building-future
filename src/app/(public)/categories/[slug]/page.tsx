@@ -17,7 +17,8 @@ import Image from "next/image";
 import { cn } from "@/lib/utils";
 import { useState, useEffect, useRef, useMemo } from "react";
 import { WILAYAS, getWilayaName } from "@/lib/wilayas";
-import { getListings, createClientRequest, type Listing } from "@/lib/db";
+import { getListings, createClientRequest, createWasteListing, type Listing } from "@/lib/db";
+import { saveImages, rollbackImages } from "@/app/actions/images";
 import PaymentStep from "@/components/ui/PaymentStep";
 import { getCurrentUser } from "@/lib/auth";
 
@@ -256,9 +257,12 @@ export default function CategoryPage() {
   // Waste pickup state (waste-recycling only)
   const [showWasteModal, setShowWasteModal] = useState(false);
   const [wasteForm, setWasteForm] = useState({
+    type: "RECYCLING",
     waste_type: "iron",
     quantity: "",
     unit: "m3",
+    asking_price: "",
+    pickup_available: false,
     wilaya: "1",
   });
   const [wasteFiles, setWasteFiles] = useState<File[]>([]);
@@ -267,6 +271,7 @@ export default function CategoryPage() {
   const [wasteSent, setWasteSent] = useState(false);
   const [wasteError, setWasteError] = useState("");
   const [showWastePayment, setShowWastePayment] = useState(false);
+  const [wasteRequestId, setWasteRequestId] = useState<string | null>(null);
   const wasteFileRef = useRef<HTMLInputElement>(null);
 
   // Listing request modal
@@ -334,11 +339,20 @@ export default function CategoryPage() {
   ];
 
   const resetWasteForm = () => {
-    setWasteForm({ waste_type: "iron", quantity: "", unit: "m3", wilaya: "1" });
+    setWasteForm({
+      type: "RECYCLING",
+      waste_type: "iron",
+      quantity: "",
+      unit: "m3",
+      asking_price: "",
+      pickup_available: false,
+      wilaya: "1",
+    });
     setWasteFiles([]);
     setWastePreviews([]);
     setWasteError("");
     setWasteSent(false);
+    setWasteRequestId(null);
   };
 
   const dbCategory = SLUG_TO_CATEGORY[slug];
@@ -550,6 +564,32 @@ export default function CategoryPage() {
 
           {/* Main Content */}
           <main className="lg:col-span-3 space-y-12">
+            {/* Request Service CTA — all pages */}
+            {!showRequestModal && (
+              <section className="bg-gradient-to-br from-emerald-500/10 via-background to-background border-2 border-emerald-500/20 rounded-3xl p-8 flex flex-col md:flex-row items-center justify-between gap-6">
+                <div className="space-y-2 text-center md:text-right">
+                  <h3 className="text-2xl font-black text-foreground">
+                    {slug === 'craftsmen' ? 'تحتاج حرفي؟' : 'ماذا تحتاج؟'}
+                  </h3>
+                  <p className="text-muted-foreground">
+                    {slug === 'craftsmen'
+                      ? 'اختر نوع الخدمة التي تحتاجها وسنرسل طلبك إلى أمهر الحرفيين'
+                      : 'أخبرنا بما تبحث عنه وسنجده لك'
+                    }
+                  </p>
+                </div>
+                <Button
+                  variant="brutal"
+                  size="lg"
+                  className="shrink-0 gap-2 whitespace-nowrap cursor-pointer"
+                  onClick={() => requireAuth(() => setShowRequestModal(true))}
+                >
+                  <Send size={18} />
+                  اطلب الآن
+                </Button>
+              </section>
+            )}
+
             {/* Category Search Bar (hidden on craftsmen) */}
             {category && slug !== 'craftsmen' && (
               <div className="flex flex-col gap-3 w-full items-end bg-card border-2 border-border p-6 rounded-2xl shadow-md" dir="rtl">
@@ -777,32 +817,6 @@ export default function CategoryPage() {
                 >
                   <Upload size={18} />
                   أرفع صورة النفايات
-                </Button>
-              </section>
-            )}
-
-            {/* Request Service CTA — all pages */}
-            {!showRequestModal && (
-              <section className="bg-gradient-to-br from-emerald-500/10 via-background to-background border-2 border-emerald-500/20 rounded-3xl p-8 flex flex-col md:flex-row items-center justify-between gap-6">
-                <div className="space-y-2 text-center md:text-right">
-                  <h3 className="text-2xl font-black text-foreground">
-                    {slug === 'craftsmen' ? 'تحتاج حرفي؟' : 'ماذا تحتاج؟'}
-                  </h3>
-                  <p className="text-muted-foreground">
-                    {slug === 'craftsmen'
-                      ? 'اختر نوع الخدمة التي تحتاجها وسنرسل طلبك إلى أمهر الحرفيين'
-                      : 'أخبرنا بما تبحث عنه وسنجده لك'
-                    }
-                  </p>
-                </div>
-                <Button
-                  variant="brutal"
-                  size="lg"
-                  className="shrink-0 gap-2 whitespace-nowrap cursor-pointer"
-                  onClick={() => requireAuth(() => setShowRequestModal(true))}
-                >
-                  <Send size={18} />
-                  أرسل طلبك الآن
                 </Button>
               </section>
             )}
@@ -1237,6 +1251,7 @@ export default function CategoryPage() {
                                     urgency: reqUrgency,
                                     wilaya: Number(reqWilaya),
                                     notes: reqNotes.trim() || undefined,
+                                    task: reqTask!,
                                   });
                                   setShowCraftPayment(true);
                                 } catch {
@@ -1376,6 +1391,43 @@ export default function CategoryPage() {
                       </div>
                     </div>
 
+                    {/* Service type + asking price */}
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-2">
+                        <label className="block text-sm font-bold text-foreground">نوع الخدمة</label>
+                        <select
+                          value={wasteForm.type}
+                          onChange={(e) => setWasteForm(p => ({ ...p, type: e.target.value }))}
+                          className="w-full h-12 px-4 rounded-xl border border-border bg-card text-foreground text-right font-medium text-sm focus:outline-none focus:ring-2 focus:ring-primary/20"
+                        >
+                          <option value="DISPOSAL">تخلص من نفايات</option>
+                          <option value="RECYCLING">إعادة تدوير</option>
+                          <option value="RENOVATION">مخلفات ترميم</option>
+                        </select>
+                      </div>
+                      <div className="space-y-2">
+                        <label className="block text-sm font-bold text-foreground">السعر المطلوب (دج)</label>
+                        <input
+                          type="number"
+                          min="0"
+                          placeholder="مثال: 5000"
+                          value={wasteForm.asking_price}
+                          onChange={(e) => setWasteForm(p => ({ ...p, asking_price: e.target.value }))}
+                          className="w-full h-12 px-4 rounded-xl border border-border bg-card text-foreground text-right font-medium text-sm focus:outline-none focus:ring-2 focus:ring-primary/20"
+                        />
+                      </div>
+                    </div>
+
+                    <label className="flex items-center gap-3 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={wasteForm.pickup_available}
+                        onChange={(e) => setWasteForm(p => ({ ...p, pickup_available: e.target.checked }))}
+                        className="w-5 h-5 accent-primary"
+                      />
+                      <span className="text-sm font-bold text-foreground">إتاحة خدمة الرفع من الموقع</span>
+                    </label>
+
                     {/* Wilaya */}
                     <div className="space-y-2">
                       <label className="block text-sm font-bold text-foreground">الولاية</label>
@@ -1457,13 +1509,57 @@ export default function CategoryPage() {
                       className="w-full h-14 text-lg"
                       disabled={!wasteForm.quantity || parseFloat(wasteForm.quantity) <= 0 || wasteSubmitting}
                       onClick={async () => {
+                        const user = await getCurrentUser();
+                        if (!user) {
+                          router.push('/login');
+                          return;
+                        }
+                        // Already persisted — go straight to payment instead of
+                        // inserting a second identical row.
+                        if (wasteRequestId) {
+                          setShowWastePayment(true);
+                          return;
+                        }
                         setWasteSubmitting(true);
                         setWasteError("");
+                        let imageUrls: string[] = [];
                         try {
-                          await new Promise(r => setTimeout(r, 1000));
+                          // Persist before payment so a paid request can never be lost.
+                          const quantity = parseFloat(wasteForm.quantity);
+                          if (!quantity || quantity <= 0) {
+                            setWasteError("يرجى إدخال كمية صالحة");
+                            return;
+                          }
+                          const res = await saveImages(wasteFiles, 'waste');
+                          if (!res.ok) {
+                            setWasteError(res.error);
+                            return;
+                          }
+                          imageUrls = res.urls;
+                          const saved = await createWasteListing({
+                            type: wasteForm.type,
+                            waste_type: wasteForm.waste_type,
+                            quantity,
+                            unit: wasteForm.unit,
+                            asking_price: parseFloat(wasteForm.asking_price) || 0,
+                            pickup_available: wasteForm.pickup_available,
+                            wilaya: parseInt(wasteForm.wilaya),
+                            images: imageUrls,
+                          });
+                          setWasteRequestId(saved.id as string);
                           setShowWastePayment(true);
-                        } catch {
-                          setWasteError("حدث خطأ أثناء الإرسال. حاول مرة أخرى.");
+                        } catch (err) {
+                          console.error(err);
+                          if (imageUrls.length > 0) {
+                            await rollbackImages(imageUrls).catch((e) =>
+                              console.error('[images] rollback failed', e)
+                            );
+                          }
+                          setWasteError(
+                            err instanceof Error && err.message
+                              ? err.message
+                              : "حدث خطأ أثناء إرسال طلب الرفع. حاول مرة أخرى."
+                          );
                         } finally {
                           setWasteSubmitting(false);
                         }
@@ -1472,6 +1568,12 @@ export default function CategoryPage() {
                       {wasteSubmitting ? (
                         <span className="flex items-center gap-2">
                           <Loader2 size={20} className="animate-spin" /> جاري الإرسال...
+                        </span>
+                      ) : wasteRequestId ? (
+                        // The request is already saved; this reopens payment
+                        // instead of inserting a duplicate row.
+                        <span className="flex items-center gap-2">
+                          <Send size={20} /> متابعة الدفع
                         </span>
                       ) : (
                         <span className="flex items-center gap-2">

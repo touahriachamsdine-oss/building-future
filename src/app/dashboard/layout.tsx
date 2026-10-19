@@ -24,6 +24,7 @@ import { getCurrentUser, signOutAction } from "@/lib/auth";
 const PROVIDER_LINKS = [
   { title: "نظرة عامة", href: "/dashboard/provider", icon: LayoutDashboard },
   { title: "إعلاناتي", href: "/dashboard/provider/listings", icon: Package },
+  { title: "الرسائل", href: "/dashboard/provider/messages", icon: MessageSquare },
   { title: "الملف الشخصي", href: "/dashboard/profile", icon: User },
   { title: "الإعدادات", href: "/dashboard/settings", icon: Settings },
 ];
@@ -48,21 +49,41 @@ export default function DashboardLayout({
 
   useEffect(() => {
     const fetchRole = async () => {
-      const user = await getCurrentUser();
-      if (user) {
+      try {
+        const user = await getCurrentUser();
+        if (!user) {
+          // Unauthenticated visitors must not see the empty shell of the
+          // dashboard — send them to login with the intended path preserved.
+          router.replace(`/login?next=${encodeURIComponent(pathname)}`);
+          return;
+        }
         setRole(user.role || 'CLIENT');
+      } catch {
+        router.replace(`/login?next=${encodeURIComponent(pathname)}`);
+      } finally {
+        setIsLoading(false);
       }
-      setIsLoading(false);
     };
     fetchRole();
-  }, []);
+  }, [router, pathname]);
 
   const handleLogout = async () => {
     await signOutAction();
     router.push("/login");
   };
 
-  const navLinks = role === 'PROVIDER' ? PROVIDER_LINKS : CLIENT_LINKS;
+const navLinks = role === 'PROVIDER' ? PROVIDER_LINKS : CLIENT_LINKS;
+
+if (isLoading) {
+    return (
+      <div className="h-screen bg-background flex items-center justify-center" dir="rtl">
+        <div className="flex items-center gap-3 text-muted font-bold">
+          <Loader2 size={20} className="animate-spin" />
+          جارٍ التحميل...
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-screen bg-background overflow-hidden text-right" dir="rtl">

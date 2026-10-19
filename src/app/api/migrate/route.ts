@@ -34,9 +34,29 @@ ON CONFLICT (id) DO NOTHING;
 
     await query(`
 ALTER TABLE bookings ALTER COLUMN provider_id DROP NOT NULL;
+ALTER TABLE bookings ALTER COLUMN client_id DROP NOT NULL;
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS baladia TEXT;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS task TEXT;
 `);
+
+    // Image storage — backed by Postgres so uploads need no external credentials.
+    await query(`
+CREATE TABLE IF NOT EXISTS images (
+  id UUID PRIMARY KEY,
+  storage_path TEXT NOT NULL,
+  mime_type VARCHAR(50) NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  data BYTEA NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_images_created ON images(created_at DESC);
+`);
+
+    // NOTE: a `waste_requests` table used to be created here, but no code ever
+    // read or wrote it — waste submissions go through createWasteListing()
+    // into `waste_listings`. The empty table was dropped so this migration no
+    // longer resurrects it.
 
     return Response.json({ success: true, message: 'Tables created' });
   } catch (error) {

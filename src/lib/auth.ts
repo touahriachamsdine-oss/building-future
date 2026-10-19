@@ -106,9 +106,10 @@ export async function signInAction(email: string, password: string) {
     
     return { success: true, user: { id: user.id, email: user.email, role } };
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'حدث خطأ أثناء تسجيل الدخول';
+    // The real error is logged server-side; the client only ever sees a generic
+    // message so table names and connection details are not disclosed.
     console.error('Sign in error:', err);
-    return { success: false, error: message };
+    return { success: false, error: 'حدث خطأ أثناء تسجيل الدخول. حاول مجدداً.' };
   }
 }
 
@@ -116,7 +117,7 @@ export async function signUpAction(
   fullName: string,
   email: string,
   password: string,
-  role: string,
+  requestedRole: string,
   extra?: {
     phone?: string;
     wilaya?: number;
@@ -127,6 +128,20 @@ export async function signUpAction(
   }
 ) {
   try {
+    // Role is derived server-side. A server action is a public HTTP endpoint, so
+    // the caller-supplied role is untrusted and must never be able to grant ADMIN.
+    const role = requestedRole === 'PROVIDER' ? 'PROVIDER' : 'CLIENT';
+
+    if (!email || !/^\S+@\S+\.\S+$/.test(email)) {
+      return { success: false, error: 'البريد الإلكتروني غير صالح' };
+    }
+    if (!password || password.length < 6) {
+      return { success: false, error: 'كلمة المرور يجب أن تكون 6 أحرف على الأقل' };
+    }
+    if (!fullName || !fullName.trim()) {
+      return { success: false, error: 'الاسم الكامل مطلوب' };
+    }
+
     // Check if user already exists
     const existing = await query('SELECT id FROM auth.users WHERE email = $1', [email]);
     if (existing.length > 0) {
@@ -143,7 +158,8 @@ export async function signUpAction(
         const { getSiteConfig } = await import('./db');
         const cfg = await getSiteConfig();
         if (cfg.auto_approve_providers) is_verified = true;
-      } catch {
+      } catch (err) {
+        console.error('Error reading site config during signup:', err);
         is_verified = false;
       }
     }
@@ -198,9 +214,8 @@ export async function signUpAction(
     
     return { success: true, user: { id: userId, email, role } };
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'حدث خطأ أثناء إنشاء الحساب';
     console.error('Sign up error:', err);
-    return { success: false, error: message };
+    return { success: false, error: 'حدث خطأ أثناء إنشاء الحساب. حاول مجدداً.' };
   }
 }
 
@@ -234,8 +249,7 @@ export async function changePasswordAction(currentPassword: string, newPassword:
 
     return { success: true };
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'حدث خطأ أثناء تغيير كلمة المرور';
     console.error('Change password error:', err);
-    return { success: false, error: message };
+    return { success: false, error: 'حدث خطأ أثناء تغيير كلمة المرور. حاول مجدداً.' };
   }
 }

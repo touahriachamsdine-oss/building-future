@@ -25,6 +25,7 @@ export type Listing = {
   };
 };
 
+
 const MOCK_LISTINGS: Listing[] = [
   {
     id: "mock-1",
@@ -394,18 +395,10 @@ export async function getListings(filters?: { category?: string; wilaya?: number
     }));
   } catch (error) {
     console.error('Error fetching listings:', error);
-    return MOCK_LISTINGS.filter(item => {
-      if (filters?.category && filters.category !== 'all' && filters.category !== 'الكل') {
-        if (item.category !== filters.category) return false;
-      }
-      if (filters?.wilaya && !isNaN(filters.wilaya)) {
-        if (item.wilaya !== filters.wilaya) return false;
-      }
-      if (filters?.search) {
-        if (!item.title.toLowerCase().includes(filters.search.toLowerCase())) return false;
-      }
-      return true;
-    });
+    // Surface the failure as "no results" rather than fabricating listings.
+    // Callers render an empty state, which is honest, instead of showing
+    // invented providers with fake ratings and prices.
+    return [];
   }
 }
 
@@ -433,6 +426,13 @@ export async function getListingById(id: string) {
           }
         };
       }
+    }
+
+// Listing ids are UUIDs. Anything else (an unknown "mock-*" id, or a
+    // hand-typed URL) can never match a row, and sending it to Postgres would
+    // fail with 22P02 on every request.
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+      return null;
     }
 
     const rows = await query(`
@@ -490,22 +490,41 @@ export async function getListingById(id: string) {
 }
 
 export async function createBooking(bookingData: {
-  client_id: string;
+  client_id?: string;
   provider_id: string;
   listing_id: string;
-  total_price: number;
+  total_price?: number;
   notes?: string;
 }) {
+  const user = await getCurrentUser();
+  if (!user) throw new Error('Not authenticated');
+
+  // client_id is always the authenticated caller — never a caller-supplied value.
+  const clientId = user.id;
+
+  // Price is derived from the listing so it cannot be forged by the caller.
+  const listings = await query(
+    'SELECT price, user_id FROM listings WHERE id = $1',
+    [bookingData.listing_id]
+  );
+  if (listings.length === 0) {
+    throw new Error('Listing not found');
+  }
+  if (String(listings[0].user_id) !== String(bookingData.provider_id)) {
+    throw new Error('Listing does not belong to this provider');
+  }
+  const price = Number(listings[0].price);
+
   try {
     const rows = await query(`
       INSERT INTO bookings (client_id, provider_id, listing_id, status, total_price, notes, created_at)
       VALUES ($1, $2, $3, 'PENDING', $4, $5, NOW())
       RETURNING *
     `, [
-      bookingData.client_id,
+      clientId,
       bookingData.provider_id,
       bookingData.listing_id,
-      bookingData.total_price,
+      price,
       bookingData.notes || null
     ]);
     return rows[0];
@@ -518,18 +537,38 @@ export async function createBooking(bookingData: {
 // ── Admin Dispatch Functions ───────────────────────────────────────────────────
 
 export async function createDispatchBooking(data: {
-  provider_id: string | null;       // null = unassigned, admin assigns later
+  provider_id: string | null;
   service_type: string;
   urgency: string;
   wilaya: number;
   notes?: string;
+  request_id?: string;   // dispatching an existing client request
 }) {
   const admin = await requireAdmin();
   if (!admin) throw new Error('Forbidden: admin only');
   try {
-    // If provider_id is provided use it as client_id too (admin-initiated command).
-    // The real client reference isn't meaningful here — the booking represents a
-    // work command, not a marketplace transaction.
+    // When dispatching an existing customer request, update that row so the
+    // original PENDING request does not linger and get dispatched twice.
+    if (data.request_id) {
+      const updated = await query(`
+        UPDATE bookings
+        SET provider_id = $1, status = 'DISPATCHED', updated_at = NOW()
+        WHERE id = $2 AND status = 'PENDING'
+        RETURNING *
+      `, [data.provider_id, data.request_id]);
+      if (updated.length === 0) {
+        throw new Error('Request is no longer pending');
+      }
+      if (data.provider_id) {
+        await insertNotification({
+          user_id: data.provider_id,
+          type: 'dispatch',
+          message: 'تم إرسال أمر عمل جديد إليك',
+        });
+      }
+      return updated[0];
+    }
+
     const rows = await query(`
       INSERT INTO bookings
         (client_id, provider_id, status, service_type, urgency, wilaya, notes, created_at)
@@ -546,7 +585,7 @@ export async function createDispatchBooking(data: {
       data.notes ?? null,
     ]);
     if (data.provider_id) {
-      await createNotification({
+      await insertNotification({
         user_id: data.provider_id,
         type: 'dispatch',
         message: 'تم إرسال أمر عمل جديد إليك',
@@ -565,7 +604,7 @@ export async function getDispatchHistory(limit = 30) {
   try {
     const rows = await query(`
       SELECT
-        b.id, b.service_type, b.urgency, b.wilaya, b.status, b.notes,
+        b.id, b.service_type, b.urgency, b.wilaya, b.status, b.notes, b.task,
         b.created_at,
         p.full_name    AS provider_name,
         p.avatar_url   AS provider_avatar,
@@ -585,6 +624,7 @@ export async function getDispatchHistory(limit = 30) {
       wilaya:        Number(r.wilaya),
       status:        r.status as string,
       notes:         r.notes as string | null,
+      task:          (r.task as string | null) ?? null,
       created_at:    r.created_at ? new Date(r.created_at as string).toISOString() : new Date().toISOString(),
       provider: r.provider_name
         ? {
@@ -648,6 +688,10 @@ export async function getAvailableProviders(serviceType?: string, wilayaId?: num
 }
 
 export async function getExistingBooking(clientId: string, providerId: string, listingId: string) {
+  const user = await getCurrentUser();
+  if (!user) throw new Error('Not authenticated');
+  // Callers may only look up their own bookings, never someone else's.
+  if (String(user.id) !== String(clientId)) throw new Error('Forbidden');
   try {
     const rows = await query(`
       SELECT id FROM bookings 
@@ -662,6 +706,12 @@ export async function getExistingBooking(clientId: string, providerId: string, l
 }
 
 export async function getProfile(id: string) {
+  const user = await getCurrentUser();
+  if (!user) throw new Error('Not authenticated');
+  // Self-service reads are fine; anyone else requires admin.
+  if (String(user.id) !== String(id) && user.role !== 'ADMIN') {
+    throw new Error('Forbidden');
+  }
   try {
     const rows = await query('SELECT * FROM profiles WHERE id = $1', [id]);
     if (rows.length === 0) return null;
@@ -673,6 +723,12 @@ export async function getProfile(id: string) {
 }
 
 export async function getProviderStats(providerId: string) {
+  const user = await getCurrentUser();
+  if (!user) throw new Error('Not authenticated');
+  // Revenue figures are private to the provider (and admins).
+  if (String(user.id) !== String(providerId) && user.role !== 'ADMIN') {
+    throw new Error('Forbidden');
+  }
   try {
     const listings = await query('SELECT id FROM listings WHERE user_id = $1', [providerId]);
     const bookings = await query('SELECT total_price, status FROM bookings WHERE provider_id = $1', [providerId]);
@@ -996,20 +1052,75 @@ export async function getProviderBookings() {
   }));
 }
 
+const BOOKING_STATUSES = ['PENDING', 'DISPATCHED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'] as const;
+type BookingStatus = (typeof BOOKING_STATUSES)[number];
+
 export async function updateBookingStatus(bookingId: string, status: string) {
   const user = await getCurrentUser();
   if (!user) throw new Error('Not authenticated');
+
+  if (!BOOKING_STATUSES.includes(status as BookingStatus)) {
+    throw new Error(`Invalid booking status: ${status}`);
+  }
+
+  // Fetch current state to enforce role-based transitions
+  const current = await query(
+    'SELECT id, client_id, provider_id, status FROM bookings WHERE id = $1',
+    [bookingId]
+  );
+  if (current.length === 0) return false;
+
+  const booking = current[0];
+  const isProvider = !!booking.provider_id && String(booking.provider_id) === user.id;
+  const isClient = !!booking.client_id && String(booking.client_id) === user.id;
+  const isAdmin = user.role === 'ADMIN';
+
+  if (!isProvider && !isClient && !isAdmin) return false;
+
+  // Only the assigned provider (or an admin) may advance work progress.
+  // A client may only cancel, never self-mark their own work COMPLETED.
+  const providerOnly: BookingStatus[] = ['DISPATCHED', 'IN_PROGRESS', 'COMPLETED'];
+  if (providerOnly.includes(status as BookingStatus) && !isProvider && !isAdmin) {
+    throw new Error('Only the assigned provider can update this status');
+  }
+
+  // Clients may only withdraw a request that has not started yet. Once a
+  // provider is working, cancelling silently would strand them.
+  const currentStatus = String(booking.status) as BookingStatus;
+  if (isClient && !isAdmin) {
+    if (status !== 'CANCELLED') {
+      throw new Error('Customers can only cancel a request');
+    }
+    if (currentStatus !== 'PENDING' && currentStatus !== 'DISPATCHED') {
+      throw new Error('This request can no longer be cancelled');
+    }
+  }
+
+  // A provider must never move work backwards — that would let a finished job
+  // be reopened and the customer notified of a false regression.
+  if (isProvider && !isAdmin) {
+    const forward: Record<BookingStatus, BookingStatus[]> = {
+      PENDING: ['DISPATCHED'],
+      DISPATCHED: ['IN_PROGRESS', 'CANCELLED'],
+      IN_PROGRESS: ['COMPLETED', 'CANCELLED'],
+      COMPLETED: [],
+      CANCELLED: [],
+    };
+    if (!forward[currentStatus]?.includes(status as BookingStatus)) {
+      throw new Error(`Invalid status change: ${currentStatus} → ${status}`);
+    }
+  }
+
   const rows = await query(`
     UPDATE bookings 
     SET status = $1, updated_at = NOW()
-    WHERE id = $2 AND (provider_id = $3 OR client_id = $3)
+    WHERE id = $2 AND ($3::boolean OR provider_id = $4 OR client_id = $4)
     RETURNING *
-  `, [status, bookingId, user.id]);
+  `, [status, bookingId, isAdmin, user.id]);
   if (rows.length > 0) {
-    const booking = rows[0];
-    const isProvider = booking.provider_id && String(booking.provider_id) === user.id;
-    const hasClient = booking.client_id && String(booking.client_id) !== user.id;
-    if (isProvider && hasClient) {
+    const updated = rows[0];
+    const hasClient = updated.client_id && String(updated.client_id) !== user.id;
+    if ((isProvider || isAdmin) && hasClient) {
       const message =
         status === 'IN_PROGRESS'
           ? 'بدأ المزود العمل على طلبك'
@@ -1018,8 +1129,8 @@ export async function updateBookingStatus(bookingId: string, status: string) {
           : status === 'CANCELLED'
           ? 'تم إلغاء الطلب من طرف المزود'
           : `تحديث حالة الطلب: ${status}`;
-      await createNotification({
-        user_id: String(booking.client_id),
+      await insertNotification({
+        user_id: String(updated.client_id),
         type: 'status_update',
         message,
       });
@@ -1243,15 +1354,16 @@ export async function createClientRequest(data: {
   urgency: string;
   wilaya: number;
   notes?: string;
+  task?: string;
 }) {
   const user = await getCurrentUser();
   if (!user) throw new Error('Not authenticated');
   try {
     const rows = await query(`
-      INSERT INTO bookings (client_id, provider_id, status, service_type, urgency, wilaya, notes, created_at)
-      VALUES ($1, NULL, 'PENDING', $2, $3, $4, $5, NOW())
+      INSERT INTO bookings (client_id, provider_id, status, service_type, urgency, wilaya, notes, task, created_at)
+      VALUES ($1, NULL, 'PENDING', $2, $3, $4, $5, $6, NOW())
       RETURNING id, status, created_at
-    `, [user.id, data.service_type, data.urgency, data.wilaya, data.notes ?? null]);
+    `, [user.id, data.service_type, data.urgency, data.wilaya, data.notes ?? null, data.task ?? null]);
     return rows[0];
   } catch (error) {
     console.error('Error creating client request:', error);
@@ -1288,7 +1400,10 @@ export async function getPendingRequests() {
     }));
   } catch (error) {
     console.error('Error fetching pending requests:', error);
-    return [];
+    // Rethrow: the admin requests panel must be able to tell "loaded, and there
+    // are none" apart from "could not load". Returning [] would present a
+    // database outage as an empty queue.
+    throw error;
   }
 }
 
@@ -1302,23 +1417,68 @@ export async function assignRequestToProvider(requestId: string, providerId: str
       WHERE id = $2 AND status = 'PENDING'
       RETURNING id, status
     `, [providerId, requestId]);
-    if (rows.length > 0) {
-      await createNotification({
-        user_id: providerId,
-        type: 'dispatch',
-        message: 'تم إرسال أمر عمل جديد إليك',
-      });
+    if (rows.length === 0) {
+      // Another admin already claimed it — surface it instead of silently no-op'ing.
+      throw new Error('الطلب تم تعيينه مسبقاً من طرف آخر');
     }
-    return rows[0] ?? null;
+    await insertNotification({
+      user_id: providerId,
+      type: 'dispatch',
+      message: 'تم إرسال أمر عمل جديد إليك',
+    });
+    return rows[0];
   } catch (error) {
     console.error('Error assigning request:', error);
     throw error;
   }
 }
 
+/**
+ * Lets the admin decline a request that cannot be fulfilled (or is invalid),
+ * so it stops occupying the pending queue.
+ */
+export async function declineRequest(requestId: string, reason?: string) {
+  const admin = await requireAdmin();
+  if (!admin) throw new Error('Forbidden: admin only');
+  const rows = await query(`
+    UPDATE bookings
+    SET status = 'CANCELLED',
+        notes = COALESCE(notes, '') || $2,
+        updated_at = NOW()
+    WHERE id = $1 AND status = 'PENDING'
+    RETURNING id, status
+  `, [
+    requestId,
+    reason ? `\n[رفض من الإدارة] ${reason}` : '\n[رفض من الإدارة]',
+  ]);
+  return rows[0] ?? null;
+}
+
+/**
+ * Lets the admin cancel a work order they previously dispatched, since a
+ * mis-assignment is otherwise irreversible from the UI.
+ */
+export async function cancelDispatch(bookingId: string) {
+  const admin = await requireAdmin();
+  if (!admin) throw new Error('Forbidden: admin only');
+  const rows = await query(`
+    UPDATE bookings
+    SET status = 'CANCELLED', updated_at = NOW()
+    WHERE id = $1 AND status IN ('DISPATCHED', 'IN_PROGRESS')
+    RETURNING id, status
+  `, [bookingId]);
+  return rows[0] ?? null;
+}
+
 // ── Notifications ──────────────────────────────────────────────
 
-export async function createNotification(notifData: {
+/**
+ * Internal, unguarded notification writer.
+ * Not exported on purpose: every export in this file is a callable server
+ * action, so exporting this would expose an unauthenticated insert to clients.
+ * Only call this from a code path that has already authorized the actor.
+ */
+async function insertNotification(notifData: {
   user_id: string;
   type: string;
   message: string;
@@ -1328,6 +1488,53 @@ export async function createNotification(notifData: {
     INSERT INTO notifications (user_id, type, message, listing_id, is_read, created_at)
     VALUES ($1, $2, $3, $4, false, NOW())
   `, [notifData.user_id, notifData.type, notifData.message, notifData.listing_id || null]);
+}
+
+/**
+ * Public server action: notify another user.
+ * The caller must be authenticated and must be able to reach the recipient —
+ * currently limited to notifying a worker about one of your own listings or
+ * your own booking, so nobody can spam arbitrary users.
+ */
+export async function createNotification(notifData: {
+  user_id: string;
+  type: string;
+  message: string;
+  listing_id?: string;
+  booking_id?: string;
+}) {
+  const user = await getCurrentUser();
+  if (!user) throw new Error('Not authenticated');
+
+  let allowed = false;
+  if (notifData.listing_id) {
+    const rows = await query(
+      'SELECT user_id FROM listings WHERE id = $1',
+      [notifData.listing_id]
+    );
+    // Either I own the listing, or I am the worker the listing belongs to.
+    allowed = rows.length === 1 && (rows[0].user_id === user.id || rows[0].user_id === notifData.user_id);
+  } else if (notifData.booking_id) {
+    const rows = await query(
+      'SELECT client_id, provider_id FROM bookings WHERE id = $1',
+      [notifData.booking_id]
+    );
+    allowed =
+      rows.length === 1 &&
+      (rows[0].client_id === user.id || rows[0].provider_id === user.id || user.role === 'ADMIN');
+  } else {
+    // No relationship to prove — refuse rather than allow blind writes.
+    allowed = false;
+  }
+
+  if (!allowed) throw new Error('Not allowed to notify this user');
+
+  await insertNotification({
+    user_id: notifData.user_id,
+    type: notifData.type,
+    message: notifData.message,
+    listing_id: notifData.listing_id,
+  });
 }
 
 export async function getUnreadNotificationCount() {
@@ -1355,7 +1562,12 @@ export async function getNotifications() {
 }
 
 export async function markNotificationRead(notificationId: string) {
-  await query('UPDATE notifications SET is_read = true WHERE id = $1', [notificationId]);
+  const user = await getCurrentUser();
+  if (!user) throw new Error('Not authenticated');
+  await query(
+    'UPDATE notifications SET is_read = true WHERE id = $1 AND user_id = $2',
+    [notificationId, user.id]
+  );
 }
 
 export async function markAllNotificationsRead() {
@@ -1418,8 +1630,15 @@ export async function getSiteConfig(): Promise<SiteConfig> {
     if (rows.length > 0) {
       return { ...DEFAULT_SITE_CONFIG, ...rows[0].config };
     }
-  } catch {
-    // table may not exist yet
+  } catch (err) {
+    // Only "table does not exist" is benign. Any other failure must surface,
+    // otherwise a real outage silently reads as "no config" — which would
+    // wrongly withhold provider approvals.
+    const code = (err as { code?: string })?.code;
+    if (code !== '42P01') {
+      console.error('Error reading site config:', err);
+      throw err;
+    }
   }
   return DEFAULT_SITE_CONFIG;
 }
@@ -1433,6 +1652,57 @@ export async function updateSiteConfig(partial: Partial<SiteConfig>) {
     `UPDATE site_config SET config = $1::jsonb, updated_at = NOW() WHERE id = 1`,
     [JSON.stringify(config)]
   );
+}
+
+export async function getAdminStats() {
+  const admin = await requireAdmin();
+  if (!admin) throw new Error('Forbidden: admin only');
+
+  const [totals] = await query<{
+    total_users: string;
+    total_listings: string;
+    completed_orders: string;
+    total_revenue: string | null;
+    new_users_7d: string;
+    new_listings_7d: string;
+    revenue_30d: string | null;
+  }>(`
+    SELECT
+      (SELECT COUNT(*) FROM profiles)::text AS total_users,
+      (SELECT COUNT(*) FROM listings)::text AS total_listings,
+      (SELECT COUNT(*) FROM bookings WHERE status = 'COMPLETED')::text AS completed_orders,
+      (SELECT COALESCE(SUM(total_price), 0) FROM bookings WHERE status = 'COMPLETED')::text AS total_revenue,
+      (SELECT COUNT(*) FROM profiles WHERE created_at >= NOW() - INTERVAL '7 days')::text AS new_users_7d,
+      (SELECT COUNT(*) FROM listings WHERE created_at >= NOW() - INTERVAL '7 days')::text AS new_listings_7d,
+      (SELECT COALESCE(SUM(total_price), 0) FROM bookings
+        WHERE status = 'COMPLETED' AND created_at >= NOW() - INTERVAL '30 days')::text AS revenue_30d
+  `);
+
+  // Per-day activity for the last 7 days, including days with no rows so the
+  // chart does not silently skip them.
+  const daily = await query<{ day: string; users: string; listings: string }>(`
+    SELECT
+      to_char(d.day, 'Dy') AS day,
+      (SELECT COUNT(*) FROM profiles WHERE created_at::date = d.day)::text AS users,
+      (SELECT COUNT(*) FROM listings WHERE created_at::date = d.day)::text AS listings
+    FROM generate_series(NOW()::date - INTERVAL '6 days', NOW()::date, INTERVAL '1 day') AS d(day)
+    ORDER BY d.day
+  `);
+
+  return {
+    totalUsers: Number(totals?.total_users ?? 0),
+    totalListings: Number(totals?.total_listings ?? 0),
+    completedOrders: Number(totals?.completed_orders ?? 0),
+    totalRevenue: Number(totals?.total_revenue ?? 0),
+    revenue30d: Number(totals?.revenue_30d ?? 0),
+    newUsers7d: Number(totals?.new_users_7d ?? 0),
+    newListings7d: Number(totals?.new_listings_7d ?? 0),
+    daily: daily.map((r) => ({
+      name: r.day,
+      users: Number(r.users),
+      listings: Number(r.listings),
+    })),
+  };
 }
 
 export async function getPendingProviders() {
@@ -1455,7 +1725,7 @@ export async function approveProvider(providerId: string) {
     `UPDATE public.profiles SET is_verified = true, updated_at = NOW() WHERE id = $1 AND role = 'PROVIDER'`,
     [providerId]
   );
-  await createNotification({
+  await insertNotification({
     user_id: providerId,
     type: 'provider_approved',
     message: 'تمت الموافقة على حسابك كمزود خدمة. يمكنك الآن الدخول إلى لوحة التحكم والبدء في نشر إعلاناتك.',
@@ -1577,7 +1847,7 @@ export async function rejectProvider(providerId: string) {
     `UPDATE public.profiles SET is_verified = false, updated_at = NOW() WHERE id = $1`,
     [providerId]
   );
-  await createNotification({
+  await insertNotification({
     user_id: providerId,
     type: 'provider_rejected',
     message: 'نأسف، لم يتم قبول طلب تسجيلك كمزود خدمة. يمكنك التواصل مع فريق الدعم لمعرفة السبب.',

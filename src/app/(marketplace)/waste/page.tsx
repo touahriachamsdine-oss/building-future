@@ -26,7 +26,7 @@ import { cn } from "@/lib/utils";
 import { useState, useEffect, useRef } from "react";
 import { getWasteListings, createWasteListing } from "@/lib/db";
 import PaymentStep from "@/components/ui/PaymentStep";
-import { supabase } from "@/lib/supabase";
+import { saveImages, rollbackImages } from "@/app/actions/images";
 import Link from "next/link";
 import { getWilayaName, WILAYAS } from "@/lib/wilayas";
 
@@ -123,17 +123,9 @@ export default function WasteMarketplace() {
   };
 
   const uploadImages = async (): Promise<string[]> => {
-    const urls: string[] = [];
-    for (const file of selectedFiles) {
-      const fileExt = file.name.split('.').pop();
-      const fileName = `${Math.random()}.${fileExt}`;
-      const filePath = `waste/${fileName}`;
-      const { error } = await supabase.storage.from('listings').upload(filePath, file);
-      if (error) continue;
-      const { data: { publicUrl } } = supabase.storage.from('listings').getPublicUrl(filePath);
-      urls.push(publicUrl);
-    }
-    return urls;
+    const res = await saveImages(selectedFiles, 'waste');
+    if (!res.ok) throw new Error(res.error);
+    return res.urls;
   };
 
   const resetForm = () => {
@@ -163,8 +155,9 @@ export default function WasteMarketplace() {
       return;
     }
 
+    let imageUrls: string[] = [];
     try {
-      const imageUrls = await uploadImages();
+      imageUrls = await uploadImages();
       await createWasteListing({
         type: formData.type,
         waste_type: formData.waste_type,
@@ -176,8 +169,13 @@ export default function WasteMarketplace() {
         images: imageUrls,
       });
       setShowWastePayment(true);
-    } catch {
-      setFormError("حدث خطأ أثناء الإرسال. حاول مرة أخرى.");
+    } catch (err) {
+      if (imageUrls.length > 0) {
+        await rollbackImages(imageUrls).catch((e) =>
+          console.error('[images] rollback failed', e)
+        );
+      }
+      setFormError(err instanceof Error && err.message ? err.message : "حدث خطأ أثناء الإرسال. حاول مرة أخرى.");
     } finally {
       setSubmitting(false);
     }

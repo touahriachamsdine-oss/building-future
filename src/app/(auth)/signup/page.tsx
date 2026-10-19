@@ -37,7 +37,7 @@ export default function SignupPage() {
           } else if (user.role === 'PROVIDER') {
             router.push('/dashboard/provider');
           } else {
-            router.push('/dashboard/client');
+            router.push('/listings');
           }
         }
       } catch (err) {
@@ -68,7 +68,7 @@ export default function SignupPage() {
 
       if (res.user) {
         // Redirect based on role
-        router.push(role === 'PROVIDER' ? '/dashboard/provider' : '/dashboard/client');
+        router.push(role === 'PROVIDER' ? '/dashboard/provider' : '/listings');
       }
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : "حدث خطأ أثناء إنشاء الحساب";

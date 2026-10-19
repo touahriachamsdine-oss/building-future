@@ -1,13 +1,15 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
-import { 
-  Users, 
-  Package, 
-  TrendingUp, 
+import {
+  Users,
+  Package,
+  TrendingUp,
   DollarSign,
   ArrowUpRight,
-  ArrowDownRight
+  Loader2,
+  AlertCircle
 } from "lucide-react";
 import { 
   AreaChart, 
@@ -19,30 +21,85 @@ import {
   ResponsiveContainer 
 } from "recharts";
 import { AdminDispatchClient } from "./AdminDispatchClient";
+import { getAdminStats, getDispatchHistory } from "@/lib/db";
+import { WILAYAS } from "@/lib/wilayas";
 
-const data = [
-  { name: "Sat", users: 4000, listings: 2400 },
-  { name: "Sun", users: 3000, listings: 1398 },
-  { name: "Mon", users: 2000, listings: 9800 },
-  { name: "Tue", users: 2780, listings: 3908 },
-  { name: "Wed", users: 1890, listings: 4800 },
-  { name: "Thu", users: 2390, listings: 3800 },
-  { name: "Fri", users: 3490, listings: 4300 },
-];
+const nf = new Intl.NumberFormat("ar-DZ");
 
-const stats = [
-  { title: "إجمالي المستخدمين", value: "24,562", change: "+12%", trend: "up", icon: Users },
-  { title: "إجمالي الإعلانات", value: "8,245", change: "+5.4%", trend: "up", icon: Package },
-  { title: "النمو الشهري", value: "18.2%", change: "-2%", trend: "down", icon: TrendingUp },
-  { title: "الإيرادات التقديرية", value: "1.2M DZD", change: "+8%", trend: "up", icon: DollarSign },
-];
+const formatDzd = (n: number) => `${nf.format(n)} دج`;
 
 export default function AdminOverview() {
+  const [data, setData] = useState<{
+    stats: Awaited<ReturnType<typeof getAdminStats>>;
+    recent: Awaited<ReturnType<typeof getDispatchHistory>>;
+  } | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([getAdminStats(), getDispatchHistory(5)])
+      .then(([stats, recent]) => { if (!cancelled) setData({ stats, recent }); })
+      .catch((err) => {
+        console.error("[admin] failed to load stats", err);
+        if (!cancelled) setLoadError("تعذّر تحميل الإحصائيات. لا يتم عرض أرقام تقديرية.");
+      });
+    return () => { cancelled = true; };
+  }, []);
+  if (loadError) {
+    return (
+      <div role="alert" className="rounded-2xl border border-red-500/30 bg-red-500/10 p-8 text-center">
+        <AlertCircle size={32} className="mx-auto text-red-500 mb-3" />
+        <p className="font-black text-foreground">{loadError}</p>
+      </div>
+    );
+  }
+
+  if (!data) {
+    return (
+      <div className="flex items-center justify-center py-24">
+        <Loader2 size={32} className="animate-spin text-primary" />
+      </div>
+    );
+  }
+
+  const { stats, recent } = data;
+
+  const cards = [
+    {
+      title: "إجمالي المستخدمين",
+      value: nf.format(stats.totalUsers),
+      detail: `+${stats.newUsers7d} هذا الأسبوع`,
+      icon: Users,
+      positive: true,
+    },
+    {
+      title: "إجمالي الإعلانات",
+      value: nf.format(stats.totalListings),
+      detail: `+${stats.newListings7d} هذا الأسبوع`,
+      icon: Package,
+      positive: true,
+    },
+    {
+      title: "الطلبات المكتملة",
+      value: nf.format(stats.completedOrders),
+      detail: "إجمالي الطلبات المنجزة",
+      icon: TrendingUp,
+      positive: true,
+    },
+    {
+      title: "الإيرادات المحققة",
+      value: formatDzd(stats.totalRevenue),
+      detail: `${formatDzd(stats.revenue30d)} خلال 30 يوماً`,
+      icon: DollarSign,
+      positive: true,
+    },
+  ];
+
   return (
     <div className="space-y-8">
       {/* KPI Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        {stats.map((stat, i) => (
+        {cards.map((stat, i) => (
           <Card key={i} className="bg-card border-border hover:border-primary/50 transition-all group shadow-sm">
             <CardHeader className="flex flex-row items-center justify-between pb-2">
               <CardTitle className="text-sm font-medium text-muted-foreground">
@@ -55,15 +112,8 @@ export default function AdminOverview() {
             <CardContent>
               <div className="text-2xl font-bold text-foreground">{stat.value}</div>
               <div className="flex items-center gap-1 mt-1">
-                {stat.trend === "up" ? (
-                  <ArrowUpRight className="text-emerald-500" size={16} />
-                ) : (
-                  <ArrowDownRight className="text-rose-500" size={16} />
-                )}
-                <span className={stat.trend === "up" ? "text-emerald-500" : "text-rose-500"}>
-                  {stat.change}
-                </span>
-                <span className="text-muted-foreground text-xs mr-1">منذ الشهر الماضي</span>
+                <ArrowUpRight className="text-emerald-500" size={16} />
+                <span className="text-emerald-500">{stat.detail}</span>
               </div>
             </CardContent>
           </Card>
@@ -78,7 +128,7 @@ export default function AdminOverview() {
           </CardHeader>
           <CardContent className="h-[400px] w-full">
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={data} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
+              <AreaChart data={stats.daily} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
                 <defs>
                   <linearGradient id="colorUsers" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="5%" stopColor="#4a6741" stopOpacity={0.1} />
@@ -123,17 +173,28 @@ export default function AdminOverview() {
             <CardTitle className="text-foreground">آخر النشاطات</CardTitle>
           </CardHeader>
           <CardContent className="space-y-6">
-            {[1, 2, 3, 4, 5].map((i) => (
-              <div key={i} className="flex items-center gap-4">
-                <div className="w-10 h-10 rounded-full bg-background flex items-center justify-center border border-border">
-                   <Users size={18} className="text-muted-foreground" />
+            {recent.length === 0 ? (
+              <p className="text-sm text-muted-foreground text-center py-6">
+                لا توجد مهام مُسندة بعد.
+              </p>
+            ) : (
+              recent.map((h) => (
+                <div key={h.id} className="flex items-center gap-4">
+                  <div className="w-10 h-10 rounded-full bg-background flex items-center justify-center border border-border shrink-0">
+                    <Users size={18} className="text-muted-foreground" />
+                  </div>
+                  <div className="flex-1 text-right" dir="rtl">
+                    <p className="text-sm font-bold text-foreground">
+                      {h.task?.trim() || "مهمة خدمة"}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {h.wilaya != null && `${WILAYAS.find((w) => w.id === h.wilaya)?.name ?? ""} • `}
+                      {new Date(h.created_at).toLocaleDateString("ar-DZ")}
+                    </p>
+                  </div>
                 </div>
-                <div className="flex-1 text-right" dir="rtl">
-                  <p className="text-sm font-bold text-foreground">مستخدم جديد انضم للمنصة</p>
-                  <p className="text-xs text-muted-foreground">منذ 10 دقائق • ولاية وهران</p>
-                </div>
-              </div>
-            ))}
+              ))
+            )}
           </CardContent>
         </Card>
       </div>

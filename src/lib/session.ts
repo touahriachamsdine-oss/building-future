@@ -12,10 +12,16 @@ export interface SessionUser {
 function getSecret(): string {
   const secret = process.env.COOKIE_SECRET;
   if (!secret) {
-    if (process.env.NODE_ENV === 'production') {
-      throw new Error('COOKIE_SECRET environment variable is not set');
+    // Only local development may fall back. Every other environment must supply
+    // its own secret, otherwise HMAC tokens are forgeable by anyone who knows
+    // the fallback string below.
+    if (process.env.NODE_ENV === 'development') {
+      return 'dev-only-insecure-session-secret-do-not-use-in-production';
     }
-    return 'dev-only-insecure-session-secret-do-not-use-in-production';
+    throw new Error('COOKIE_SECRET environment variable is not set');
+  }
+  if (secret.length < 32 && process.env.NODE_ENV === 'production') {
+    throw new Error('COOKIE_SECRET must be at least 32 characters in production');
   }
   return secret;
 }

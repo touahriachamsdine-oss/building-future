@@ -103,6 +103,7 @@ export default function WorkerDispatchInbox() {
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [filter, setFilter] = useState<"ALL" | "DISPATCHED" | "IN_PROGRESS" | "COMPLETED">("ALL");
 
   const loadOrders = async () => {
@@ -137,16 +138,28 @@ export default function WorkerDispatchInbox() {
 
   const handleAction = async (id: string, action: "start" | "complete" | "decline") => {
     setActionLoading(id + action);
+    setActionError(null);
+    const previous = orders;
     try {
       const status =
         action === "start" ? "IN_PROGRESS" :
         action === "complete" ? "COMPLETED" :
         "CANCELLED";
-      await updateBookingStatus(id, status);
+      // The action returns false when the booking moved on (reassigned,
+      // cancelled, or already completed by someone else). Only then is it
+      // safe to show the new status locally.
+      const ok = await updateBookingStatus(id, status);
+      if (!ok) {
+        setOrders(previous);
+        setActionError("تعذّر تحديث حالة الطلب. قد يكون الطلب قد عُيّن لعامل آخر.");
+        return;
+      }
       setOrders((prev) => prev.map((o) => (o.id === id ? { ...o, status } : o)));
       if (action !== "decline") setExpanded(null);
     } catch (err) {
       console.error(err);
+      setOrders(previous);
+      setActionError("حدث خطأ أثناء تحديث الطلب. حاول مجدداً.");
     } finally {
       setActionLoading(null);
     }
@@ -163,16 +176,24 @@ export default function WorkerDispatchInbox() {
   return (
     <div className="min-h-screen space-y-8 text-right" dir="rtl">
 
+      {/* Action error */}
+      {actionError && (
+        <div role="alert" className="flex items-center gap-2 rounded-2xl border border-red-500/30 bg-red-500/10 px-5 py-3 text-sm font-bold text-red-500">
+          <AlertCircle size={16} />
+          {actionError}
+        </div>
+      )}
+
       {/* Header */}
       <div className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-[var(--card)] to-[var(--secondary)] border border-[var(--border)] p-8">
         <div className="absolute inset-0 diagonal-bg opacity-5" />
-        <div className="relative z-10 flex items-center justify-between">
-          <div>
+        <div className="relative z-10 flex items-center justify-between gap-6 flex-wrap">
+          <div className="min-w-0">
             <p className="text-xs font-bold uppercase tracking-widest text-[var(--primary)] mb-2">صندوق المهام</p>
             <h1 className="text-3xl font-black text-[var(--foreground)]">أوامر العمل الواردة</h1>
             <p className="text-[var(--muted)] mt-2 text-sm">تأتيك المهام من الإدارة — لا تتصل بالعملاء مباشرة</p>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 shrink-0">
             <button
               onClick={loadOrders}
               disabled={loading}

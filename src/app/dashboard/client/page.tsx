@@ -21,8 +21,11 @@ import {
   Clock,
   CheckCircle2,
   AlertCircle,
+  AlertTriangle,
+  RefreshCw,
   Loader2,
 } from "lucide-react";
+import { useCallback } from "react";
 import { createClientRequest, getClientBookings } from "@/lib/db";
 import { WILAYAS } from "@/lib/wilayas";
 
@@ -190,23 +193,41 @@ export default function ClientCommandPanel() {
   const [submitError, setSubmitError] = useState("");
   const [orders, setOrders] = useState<ClientOrder[]>([]);
   const [ordersLoading, setOrdersLoading] = useState(true);
+  const [ordersError, setOrdersError] = useState("");
 
-  useEffect(() => {
-    getClientBookings()
-      .then((rows) => {
-        const mapped: ClientOrder[] = rows.map((b) => ({
+  const loadOrders = useCallback(async () => {
+    setOrdersLoading(true);
+    setOrdersError("");
+    try {
+      const rows = await getClientBookings();
+      setOrders(
+        rows.map((b) => ({
           id: b.id,
           serviceId: b.service_type ?? "general",
           status: b.status,
           created_at: b.created_at,
           urgency: b.urgency ?? "normal",
           title: b.listings?.title ?? null,
-        }));
-        setOrders(mapped);
-      })
-      .catch((err) => console.error(err))
-      .finally(() => setOrdersLoading(false));
+        }))
+      );
+    } catch (err) {
+      // Never fall through to the empty state on failure — an empty list and a
+      // failed request look identical to the customer otherwise.
+      console.error(err);
+      setOrdersError("تعذّر تحميل طلباتك. تحقّق من اتصالك ثم أعد المحاولة.");
+    } finally {
+      setOrdersLoading(false);
+    }
   }, []);
+
+  useEffect(() => {
+    // Deferred so the loading flag is set outside the effect body — setting it
+    // synchronously here would cascade an extra render on mount.
+    const id = requestAnimationFrame(() => {
+      void loadOrders();
+    });
+    return () => cancelAnimationFrame(id);
+  }, [loadOrders]);
 
   const selectedService = SERVICES.find((s) => s.id === selected);
 
@@ -434,6 +455,18 @@ export default function ClientCommandPanel() {
           <div className="flex flex-col items-center justify-center py-12 gap-3 text-[var(--muted)]">
             <Loader2 size={28} className="animate-spin text-[var(--primary)]" />
             <span className="text-sm">جارٍ تحميل الطلبات...</span>
+          </div>
+        ) : ordersError ? (
+          <div className="rounded-3xl border-2 border-dashed border-red-500/30 bg-red-500/5 p-12 text-center">
+            <AlertTriangle size={40} className="mx-auto text-red-400 mb-3" />
+            <p className="text-red-400 text-sm font-bold mb-4">{ordersError}</p>
+            <button
+              onClick={loadOrders}
+              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-[var(--primary)] text-[var(--primary-foreground)] font-bold text-sm hover:opacity-90"
+            >
+              <RefreshCw size={14} />
+              إعادة المحاولة
+            </button>
           </div>
         ) : orders.length === 0 ? (
           <div className="rounded-3xl border-2 border-dashed border-[var(--border)] p-12 text-center">
