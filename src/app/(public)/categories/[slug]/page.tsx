@@ -467,8 +467,8 @@ export default function CategoryPage() {
       <div className="container mx-auto px-4 py-12">
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-12">
           {/* Sidebar Filters */}
-          <aside className="lg:col-span-1 space-y-8">
-            <div className="bg-card border-2 border-border rounded-2xl p-6 sticky top-24 shadow-xl">
+          <aside className="lg:col-span-1 space-y-8 lg:sticky lg:top-24 lg:z-20 lg:max-h-[calc(100dvh-7rem)] lg:overflow-y-auto lg:overscroll-contain lg:pe-1">
+            <div className="bg-card border-2 border-border rounded-2xl p-6 shadow-xl">
               <div className="flex items-center justify-between mb-6">
                 <h3 className="font-bold text-lg text-foreground flex items-center gap-2">
                   <Filter size={18} className="text-primary" /> تصفية النتائج
