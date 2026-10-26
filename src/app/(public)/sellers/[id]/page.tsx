@@ -1,7 +1,5 @@
 "use client";
 
-import { Navbar } from "@/components/ui/Navbar";
-import { Footer } from "@/components/ui/Footer";
 import { Button } from "@/components/ui/Button";
 import { Star, MapPin, CheckCircle, Phone, MessageSquare, Share2, ShieldCheck, Clock, Award } from "lucide-react";
 import Image from "next/image";
@@ -64,9 +62,7 @@ export default function SellerProfilePage() {
 
   return (
     <div className="min-h-screen bg-background text-foreground">
-      <Navbar />
-
-      <main className="pb-20">
+      <div className="pb-20">
         {/* Cover & Profile Image */}
         <div className="relative h-64 md:h-80 w-full">
           <Image src={seller.cover} alt="Cover" fill className="object-cover" />
@@ -213,9 +209,7 @@ export default function SellerProfilePage() {
             </div>
           </div>
         </div>
-      </main>
-
-      <Footer />
+      </div>
     </div>
   );
 }

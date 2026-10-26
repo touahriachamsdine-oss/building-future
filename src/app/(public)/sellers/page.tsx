@@ -1,7 +1,5 @@
 "use client";
 
-import { Navbar } from "@/components/ui/Navbar";
-import { Footer } from "@/components/ui/Footer";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Star, MapPin, CheckCircle, Search } from "lucide-react";
@@ -59,9 +57,7 @@ const SELLERS = [
 export default function SellersPage() {
   return (
     <div className="min-h-screen bg-background">
-      <Navbar />
-      
-      <main className="container mx-auto px-4 py-12">
+      <div className="container mx-auto px-4 py-12">
         {/* Header */}
         <div className="flex flex-col md:flex-row md:items-end justify-between gap-6 mb-12">
           <div>
@@ -152,9 +148,7 @@ export default function SellersPage() {
             </Link>
           ))}
         </div>
-      </main>
-
-      <Footer />
+      </div>
     </div>
   );
 }
