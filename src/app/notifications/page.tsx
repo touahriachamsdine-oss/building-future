@@ -15,6 +15,7 @@ interface Notification {
   message: string;
   listing_id: string | null;
   listing_title: string | null;
+  link: string | null;
   is_read: boolean;
   created_at: string;
 }
@@ -117,14 +118,21 @@ export default function NotificationsPage() {
                   </button>
                 )}
               </div>
-              {n.listing_id && (
+              {n.link ? (
+                <Link
+                  href={n.link}
+                  className="inline-block mt-3 text-xs text-primary font-medium hover:underline"
+                >
+                  عرض التفاصيل
+                </Link>
+              ) : n.listing_id ? (
                 <Link
                   href={`/listings/${n.listing_id}`}
                   className="inline-block mt-3 text-xs text-primary font-medium hover:underline"
                 >
                   عرض الإعلان
                 </Link>
-              )}
+              ) : null}
             </div>
           ))}
         </div>

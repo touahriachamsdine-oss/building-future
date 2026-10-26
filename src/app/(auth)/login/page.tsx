@@ -17,24 +17,32 @@ export default function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const router = useRouter();
 
+  const redirectForRole = (role: string) => {
+    if (role === 'ADMIN') {
+      sessionStorage.removeItem('binaa_post_login_redirect');
+      return '/admin';
+    }
+    if (role === 'PROVIDER') {
+      sessionStorage.removeItem('binaa_post_login_redirect');
+      return '/dashboard/provider';
+    }
+    const pending = sessionStorage.getItem('binaa_post_login_redirect');
+    // Only allow internal paths, never an absolute URL from storage.
+    if (pending && pending.startsWith('/') && !pending.startsWith('//')) return pending;
+    return '/listings';
+  };
+
   useEffect(() => {
     const checkSession = async () => {
       try {
         const user = await getCurrentUser();
-        if (user) {
-          if (user.role === 'ADMIN') {
-            router.push('/admin');
-          } else if (user.role === 'PROVIDER') {
-            router.push('/dashboard/provider');
-          } else {
-            router.push('/listings');
-          }
-        }
+        if (user) router.push(redirectForRole(user.role));
       } catch (err) {
         console.error("Session check error:", err);
       }
     };
     checkSession();
+    // redirectForRole is intentionally read at call time; the effect runs once.
   }, [router]);
 
   const handleLogin = async (e: React.FormEvent) => {
@@ -50,13 +58,7 @@ export default function LoginPage() {
       }
 
       if (res.user) {
-        if (res.user.role === 'ADMIN') {
-          router.push('/admin');
-        } else if (res.user.role === 'PROVIDER') {
-          router.push('/dashboard/provider');
-        } else {
-          router.push('/listings');
-        }
+        router.push(redirectForRole(res.user.role));
       }
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : "فشل تسجيل الدخول. يرجى التحقق من بياناتك.";

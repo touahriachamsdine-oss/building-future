@@ -3,15 +3,22 @@
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
-import { Search, MapPin, Tag, Filter, Star, Loader2, X, History, Sparkles, Trash2 } from "lucide-react";
+import {
+  Search, MapPin, Tag, Filter, Star, Loader2, X, History, Sparkles, Trash2,
+  Send, CheckCircle2, AlertCircle, ImagePlus,
+} from "lucide-react";
 import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "@/lib/utils";
 import Link from "next/link";
 import Image from "next/image";
+import { useRouter } from "next/navigation";
 
 import { getWilayaName, WILAYAS } from "@/lib/wilayas";
-import { getListings } from "@/lib/db";
+import { getListings, createClientRequest } from "@/lib/db";
+import { getCurrentUser } from "@/lib/auth";
+import { saveImages, rollbackImages } from "@/app/actions/images";
+import { MAX_IMAGE_BYTES } from "@/lib/image-storage";
 
 interface Listing {
   id: string;
@@ -47,7 +54,14 @@ const POPULAR_KEYWORDS = [
   "بلاط وسيراميك"
 ];
 
+const CUSTOM_REQUEST_URGENCY = [
+  { id: "normal", label: "عادي" },
+  { id: "urgent", label: "عاجل" },
+  { id: "asap", label: "فوري جداً" },
+];
+
 export default function ListingsPage() {
+  const router = useRouter();
   const [listings, setListings] = useState<Listing[]>([]);
   const [selectedCategory, setSelectedCategory] = useState("all");
   const [selectedWilaya, setSelectedWilaya] = useState("all");
@@ -68,6 +82,213 @@ export default function ListingsPage() {
     }
   });
   const containerRef = useRef<HTMLDivElement>(null);
+
+  // Custom request modal state — the request is sent to the admin, who then
+  // decides how to fulfil it.
+  const [userRole, setUserRole] = useState<string | null>(null);
+  const [showRequestModal, setShowRequestModal] = useState(false);
+  const [requestText, setRequestText] = useState("");
+  const [requestWilaya, setRequestWilaya] = useState("");
+  const [requestUrgency, setRequestUrgency] = useState("normal");
+  const [requestCommune, setRequestCommune] = useState("");
+  const [requestBudgetMin, setRequestBudgetMin] = useState("");
+  const [requestBudgetMax, setRequestBudgetMax] = useState("");
+  const [requestPreferredDate, setRequestPreferredDate] = useState("");
+  const [requestFiles, setRequestFiles] = useState<File[]>([]);
+  const [requestPreviews, setRequestPreviews] = useState<string[]>([]);
+  const [requestReference, setRequestReference] = useState<string | null>(null);
+  const [requestSubmitting, setRequestSubmitting] = useState(false);
+  const [requestError, setRequestError] = useState("");
+  const [requestSent, setRequestSent] = useState(false);
+
+  const openRequestModal = () => {
+    setRequestError("");
+    setRequestSent(false);
+    setRequestReference(null);
+    setShowRequestModal(true);
+  };
+
+  const clearPreviews = () => {
+    setRequestPreviews((urls) => {
+      urls.forEach((url) => URL.revokeObjectURL(url));
+      return [];
+    });
+    setRequestFiles([]);
+  };
+
+  const closeRequestModal = () => {
+    if (requestSubmitting) return;
+    setShowRequestModal(false);
+    setRequestError("");
+    setRequestSent(false);
+    setRequestReference(null);
+    clearPreviews();
+  };
+
+  useEffect(() => {
+    getCurrentUser()
+      .then((user) => setUserRole(user?.role ?? null))
+      .catch(() => setUserRole(null));
+  }, []);
+
+  // Resume a request draft after the login redirect. Only text fields can be
+  // preserved across navigation; File objects cannot be serialized.
+  useEffect(() => {
+    const marker = sessionStorage.getItem("binaa_post_login_redirect");
+    if (!marker?.includes("customRequest=1")) return;
+    sessionStorage.removeItem("binaa_post_login_redirect");
+    window.history.replaceState(null, "", "/listings");
+    const raw = localStorage.getItem("binaa_custom_request_draft");
+    if (!raw) return;
+
+    let draft: Record<string, string>;
+    try {
+      draft = JSON.parse(raw) as Record<string, string>;
+    } catch {
+      localStorage.removeItem("binaa_custom_request_draft");
+      return;
+    }
+
+    // Restore on the next task: setState must not run synchronously inside an
+    // effect body, and React will then render the prefilled modal in one pass.
+    const timer = setTimeout(() => {
+      setRequestText(draft.text ?? "");
+      setRequestWilaya(draft.wilaya ?? "");
+      setRequestUrgency(draft.urgency ?? "normal");
+      setRequestCommune(draft.commune ?? "");
+      setRequestBudgetMin(draft.budgetMin ?? "");
+      setRequestBudgetMax(draft.budgetMax ?? "");
+      setRequestPreferredDate(draft.preferredDate ?? "");
+      setShowRequestModal(true);
+    }, 0);
+    return () => clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!showRequestModal) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !requestSubmitting) {
+        setShowRequestModal(false);
+        setRequestError("");
+        setRequestSent(false);
+        setRequestReference(null);
+        setRequestPreviews((urls) => {
+          urls.forEach((url) => URL.revokeObjectURL(url));
+          return [];
+        });
+        setRequestFiles([]);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [showRequestModal, requestSubmitting]);
+
+  const handleFilesSelected = (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const incoming = Array.from(files);
+    if (requestFiles.length + incoming.length > 3) {
+      setRequestError("يمكن إرفاق 3 صور كحد أقصى");
+      return;
+    }
+    const invalid = incoming.find(
+      (file) => !file.type.startsWith("image/") || file.size > MAX_IMAGE_BYTES
+    );
+    if (invalid) {
+      setRequestError("الصور يجب أن تكون JPG أو PNG أو WebP أو GIF وبحجم أقل من 5 ميغابايت");
+      return;
+    }
+    setRequestError("");
+    setRequestFiles((current) => [...current, ...incoming]);
+    setRequestPreviews((current) => [
+      ...current,
+      ...incoming.map((file) => URL.createObjectURL(file)),
+    ]);
+  };
+
+  const handleRemoveFile = (index: number) => {
+    setRequestPreviews((urls) => {
+      const target = urls[index];
+      if (target) URL.revokeObjectURL(target);
+      return urls.filter((_, i) => i !== index);
+    });
+    setRequestFiles((files) => files.filter((_, i) => i !== index));
+  };
+
+  const handleSubmitRequest = async () => {
+    if (!requestText.trim()) {
+      setRequestError("اكتب تفاصيل طلبك أولاً");
+      return;
+    }
+    if (!requestWilaya) {
+      setRequestError("الرجاء اختيار الولاية");
+      return;
+    }
+    if (requestBudgetMin && requestBudgetMax && Number(requestBudgetMax) < Number(requestBudgetMin)) {
+      setRequestError("الحد الأعلى للميزانية يجب أن يكون أكبر من الحد الأدنى");
+      return;
+    }
+    setRequestError("");
+    setRequestSubmitting(true);
+    try {
+      const user = await getCurrentUser();
+      if (!user) {
+        localStorage.setItem(
+          "binaa_custom_request_draft",
+          JSON.stringify({
+            text: requestText,
+            wilaya: requestWilaya,
+            urgency: requestUrgency,
+            commune: requestCommune,
+            budgetMin: requestBudgetMin,
+            budgetMax: requestBudgetMax,
+            preferredDate: requestPreferredDate,
+          })
+        );
+        sessionStorage.setItem("binaa_post_login_redirect", "/listings?customRequest=1");
+        setShowRequestModal(false);
+        router.push("/login");
+        return;
+      }
+
+      let uploadedUrls: string[] = [];
+      if (requestFiles.length > 0) {
+        const upload = await saveImages(requestFiles, "requests");
+        if (!upload.ok) {
+          setRequestError(upload.error);
+          return;
+        }
+        uploadedUrls = upload.urls;
+      }
+
+      const result = await createClientRequest({
+        service_type: "custom",
+        urgency: requestUrgency,
+        wilaya: Number(requestWilaya),
+        notes: requestText.trim(),
+        commune: requestCommune.trim() || undefined,
+        budget_min: requestBudgetMin ? Number(requestBudgetMin) : null,
+        budget_max: requestBudgetMax ? Number(requestBudgetMax) : null,
+        preferred_date: requestPreferredDate || null,
+        attachments: uploadedUrls,
+      });
+
+      if (!result.ok) {
+        if (uploadedUrls.length > 0) await rollbackImages(uploadedUrls);
+        setRequestError(result.error);
+        return;
+      }
+
+      localStorage.removeItem("binaa_custom_request_draft");
+      setRequestReference(result.request.id.slice(0, 8));
+      setRequestSent(true);
+      clearPreviews();
+    } catch (err) {
+      console.error(err);
+      setRequestError("حدث خطأ أثناء إرسال الطلب. حاول مرة أخرى.");
+    } finally {
+      setRequestSubmitting(false);
+    }
+  };
 
   // Debounce search query
   useEffect(() => {
@@ -366,13 +587,28 @@ export default function ListingsPage() {
             </select>
           </div>
 
-          <div className="p-6 bg-primary/10 rounded-2xl border border-primary/20 space-y-4">
-            <h4 className="font-bold text-primary">هل لديك شيء للبيع؟</h4>
-            <p className="text-sm text-primary/80">انشر إعلانك الآن واحصل على عروض من آلاف المهتمين.</p>
-            <Link href="/dashboard/provider/listings/new">
-              <Button variant="brutal" className="w-full mt-4">أضف إعلان مجاناً</Button>
-            </Link>
-          </div>
+          {userRole === "PROVIDER" ? (
+            <div className="p-6 bg-primary rounded-2xl space-y-4 text-white">
+              <h4 className="font-bold">هل لديك شيء للبيع؟</h4>
+              <p className="text-sm text-white/80">
+                انشر إعلانك الآن واحصل على عروض من آلاف المهتمين.
+              </p>
+              <Link href="/dashboard/provider/listings/new" className="block">
+                <Button variant="secondary" className="w-full mt-4">
+                  أضف إعلان مجاناً
+                </Button>
+              </Link>
+            </div>
+          ) : (
+            <div className="p-6 bg-primary/10 rounded-2xl border border-primary/20 space-y-4">
+              <h4 className="font-bold text-primary">هل لديك طلب مخصص؟</h4>
+              <p className="text-sm text-primary/80">أرسل طلبك الآن وسيتولى فريق الإدارة توفير ما تحتاجه.</p>
+              <Button variant="brutal" className="w-full mt-4" onClick={openRequestModal}>
+                <Send size={16} className="ml-2" />
+                أرسل طلبك الآن
+              </Button>
+            </div>
+          )}
         </aside>
 
         {/* Listings Grid */}
@@ -444,6 +680,233 @@ export default function ListingsPage() {
            )}
         </div>
       </div>
+
+      {/* Custom request modal — sent to the admin for review */}
+      <AnimatePresence>
+        {showRequestModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+            onClick={(e) => { if (e.target === e.currentTarget) closeRequestModal(); }}
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              role="dialog"
+              aria-modal="true"
+              aria-label="طلب مخصص"
+              className="bg-card border border-border rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto"
+              dir="rtl"
+            >
+              <div className="flex items-center justify-between p-6 border-b border-border">
+                <h3 className="text-xl font-black text-foreground flex items-center gap-2">
+                  <Send size={20} className="text-primary" />
+                  طلب مخصص
+                </h3>
+                <button
+                  onClick={closeRequestModal}
+                  className="p-1 hover:bg-primary/5 rounded-lg transition-colors"
+                  disabled={requestSubmitting}
+                  aria-label="إغلاق"
+                >
+                  <X size={20} className="text-muted-foreground" />
+                </button>
+              </div>
+
+              <div className="p-6 space-y-5">
+                {requestSent ? (
+                  <motion.div
+                    initial={{ scale: 0.8, opacity: 0 }}
+                    animate={{ scale: 1, opacity: 1 }}
+                    className="py-12 text-center space-y-4"
+                  >
+                    <div className="w-16 h-16 bg-emerald-500/10 rounded-full flex items-center justify-center mx-auto">
+                      <CheckCircle2 size={36} className="text-emerald-500" />
+                    </div>
+                    <h3 className="text-xl font-bold text-foreground">تم إرسال طلبك!</h3>
+                    <p className="text-muted-foreground text-sm">
+                      ستراجع الإدارة طلبك وتتواصل معك لتوفير ما تحتاجه. يمكنك متابعة العرض
+                      والرد عليه من لوحة حسابك.
+                    </p>
+                    {requestReference && (
+                      <p className="text-xs font-bold text-primary" dir="ltr">
+                        #{requestReference}
+                      </p>
+                    )}
+                    <Button variant="outline" onClick={closeRequestModal}>
+                      حسناً
+                    </Button>
+                  </motion.div>
+                ) : (
+                  <>
+                    <div className="space-y-2">
+                      <label className="block text-sm font-bold text-foreground">
+                        ماذا تحتاج بالضبط؟
+                      </label>
+                      <textarea
+                        value={requestText}
+                        onChange={(e) => setRequestText(e.target.value)}
+                        rows={4}
+                        placeholder="مثال: أبحث عن مورد حديد تسليح 12 ملم بكمية 5 أطنان في وهران..."
+                        className="w-full bg-background border border-border text-foreground rounded-xl py-3 px-4 text-sm outline-none focus:ring-2 focus:ring-primary/20 resize-none placeholder:text-muted-foreground"
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                      <div className="space-y-2">
+                        <label className="block text-sm font-bold text-foreground">الولاية</label>
+                        <select
+                          value={requestWilaya}
+                          onChange={(e) => setRequestWilaya(e.target.value)}
+                          className="w-full h-12 px-4 rounded-xl border border-border bg-card text-foreground text-right font-medium text-sm focus:outline-none focus:ring-2 focus:ring-primary/20"
+                        >
+                          <option value="">-- اختر الولاية --</option>
+                          {WILAYAS.map((w) => (
+                            <option key={w.id} value={String(w.id)}>{w.name}</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="space-y-2">
+                        <label className="block text-sm font-bold text-foreground">مستوى الاستعجال</label>
+                        <div className="grid grid-cols-3 gap-2">
+                          {CUSTOM_REQUEST_URGENCY.map((u) => (
+                            <button
+                              key={u.id}
+                              type="button"
+                              onClick={() => setRequestUrgency(u.id)}
+                              className={cn(
+                                "py-3 rounded-xl border-2 text-xs font-bold transition-all",
+                                requestUrgency === u.id
+                                  ? "bg-primary text-primary-foreground border-primary shadow-md"
+                                  : "bg-background border-border text-muted-foreground hover:border-primary/50"
+                              )}
+                            >
+                              {u.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="space-y-4 rounded-xl border border-border bg-background/60 p-4">
+                      <p className="text-xs font-bold text-foreground">تفاصيل إضافية (اختياري)</p>
+                      <p className="text-[11px] text-muted-foreground">
+                        تساعد الإدارة على تقديم عرض أدق من أول مرة.
+                      </p>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div className="space-y-2">
+                          <label className="block text-xs font-bold text-foreground">البلدية</label>
+                          <Input
+                            value={requestCommune}
+                            onChange={(e) => setRequestCommune(e.target.value)}
+                            placeholder="مثال: بئر الجير"
+                            maxLength={100}
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <label className="block text-xs font-bold text-foreground">التاريخ المفضل</label>
+                          <Input
+                            type="date"
+                            value={requestPreferredDate}
+                            onChange={(e) => setRequestPreferredDate(e.target.value)}
+                            min={new Date().toISOString().slice(0, 10)}
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <label className="block text-xs font-bold text-foreground">الميزانية من (دج)</label>
+                          <Input
+                            type="number"
+                            min={0}
+                            value={requestBudgetMin}
+                            onChange={(e) => setRequestBudgetMin(e.target.value)}
+                            placeholder="اختياري"
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <label className="block text-xs font-bold text-foreground">إلى (دج)</label>
+                          <Input
+                            type="number"
+                            min={0}
+                            value={requestBudgetMax}
+                            onChange={(e) => setRequestBudgetMax(e.target.value)}
+                            placeholder="اختياري"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="space-y-2">
+                        <label className="block text-xs font-bold text-foreground">
+                          صور توضيحية (حتى 3 صور)
+                        </label>
+                        <label className="flex cursor-pointer items-center justify-center gap-2 rounded-xl border-2 border-dashed border-border px-4 py-4 text-xs font-bold text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary">
+                          <ImagePlus size={18} />
+                          إضافة صور
+                          <input
+                            type="file"
+                            accept="image/jpeg,image/png,image/webp,image/gif"
+                            multiple
+                            className="hidden"
+                            onChange={(e) => {
+                              handleFilesSelected(e.target.files);
+                              e.target.value = "";
+                            }}
+                          />
+                        </label>
+                        {requestPreviews.length > 0 && (
+                          <div className="flex flex-wrap gap-2">
+                            {requestPreviews.map((url, index) => (
+                              <div key={url} className="relative h-16 w-16 overflow-hidden rounded-lg border border-border">
+                                <Image src={url} alt="معاينة" fill unoptimized className="object-cover" sizes="64px" />
+                                <button
+                                  type="button"
+                                  onClick={() => handleRemoveFile(index)}
+                                  className="absolute left-0.5 top-0.5 rounded-full bg-black/70 p-1 text-white hover:bg-red-500"
+                                  aria-label="حذف الصورة"
+                                >
+                                  <X size={10} />
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {requestError && (
+                      <div className="flex items-center gap-2 p-3 rounded-xl bg-red-500/10 border border-red-500/20 text-red-600 dark:text-red-400 text-sm font-medium">
+                        <AlertCircle size={16} />
+                        {requestError}
+                      </div>
+                    )}
+
+                    <Button
+                      variant="brutal"
+                      className="w-full h-14 text-lg"
+                      disabled={requestSubmitting}
+                      onClick={handleSubmitRequest}
+                    >
+                      {requestSubmitting ? (
+                        <span className="flex items-center gap-2">
+                          <Loader2 size={20} className="animate-spin" /> جاري الإرسال...
+                        </span>
+                      ) : (
+                        <span className="flex items-center gap-2">
+                          <Send size={20} /> إرسال الطلب للإدارة
+                        </span>
+                      )}
+                    </Button>
+                  </>
+                )}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

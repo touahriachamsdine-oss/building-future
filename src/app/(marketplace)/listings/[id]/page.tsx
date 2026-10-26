@@ -58,7 +58,6 @@ export default function ListingDetailPage({ params }: { params: Promise<{ id: st
   const [isContacting, setIsContacting] = useState(false);
   const [showContactPayment, setShowContactPayment] = useState(false);
   const [contactPaymentDone, setContactPaymentDone] = useState(false);
-  const [contactUserRole, setContactUserRole] = useState<string | null>(null);
   const router = useRouter();
 
   useEffect(() => {
@@ -90,11 +89,10 @@ export default function ListingDetailPage({ params }: { params: Promise<{ id: st
         router.push('/login');
         return;
       }
-      setContactUserRole(user.role);
 
       const existingBooking = await getExistingBooking(user.id, listing.user_id, listing.id);
       if (existingBooking) {
-        router.push(user.role === 'PROVIDER' ? '/dashboard/provider/messages' : '/dashboard/client');
+        router.push('/dashboard/provider/messages');
         return;
       }
 
@@ -379,7 +377,7 @@ export default function ListingDetailPage({ params }: { params: Promise<{ id: st
                     </div>
                     <h3 className="text-xl font-bold text-foreground">تم التواصل بنجاح!</h3>
                     <p className="text-muted-foreground text-sm">يمكنك متابعة المحادثة مع المزود من صفحة الرسائل</p>
-                    <Button variant="brutal" onClick={() => router.push(contactUserRole === 'PROVIDER' ? '/dashboard/provider/messages' : '/dashboard/client')}>
+                    <Button variant="brutal" onClick={() => router.push('/dashboard/provider/messages')}>
                       الذهاب إلى الرسائل
                     </Button>
                   </motion.div>

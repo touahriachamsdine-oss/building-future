@@ -1246,13 +1246,17 @@ export default function CategoryPage() {
                                     router.push('/login');
                                     return;
                                   }
-                                  await createClientRequest({
+                                  const result = await createClientRequest({
                                     service_type: reqService!,
                                     urgency: reqUrgency,
                                     wilaya: Number(reqWilaya),
                                     notes: reqNotes.trim() || undefined,
                                     task: reqTask!,
                                   });
+                                  if (!result.ok) {
+                                    setReqError(result.error);
+                                    return;
+                                  }
                                   setShowCraftPayment(true);
                                 } catch {
                                   setReqError("حدث خطأ أثناء الإرسال. حاول مرة أخرى.");

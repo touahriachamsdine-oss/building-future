@@ -26,8 +26,17 @@ import {
   Loader2,
   CheckCheck,
   RefreshCw,
+  FileText,
+  Wallet,
+  CalendarDays,
+  Timer,
 } from "lucide-react";
-import { getProviderBookings, updateBookingStatus } from "@/lib/db";
+import Image from "next/image";
+import {
+  getProviderBookings,
+  updateBookingStatus,
+  respondToAssignment,
+} from "@/lib/db";
 import { getWilayaName } from "@/lib/wilayas";
 
 // ── Service icons map ──────────────────────────────────────────────────────────
@@ -45,6 +54,7 @@ const SERVICE_MAP: Record<string, { icon: React.ElementType; label: string; colo
   safety:      { icon: HardHat,      label: "إشراف وسلامة",  color: "text-orange-400",  grad: "from-orange-400 to-red-500" },
   hvac:        { icon: Thermometer,  label: "تكييف وتدفئة", color: "text-cyan-400",    grad: "from-cyan-400 to-teal-500" },
   general:     { icon: Wrench,       label: "خدمة عامة",      color: "text-slate-400",   grad: "from-slate-500 to-slate-700" },
+  custom:      { icon: FileText,     label: "طلب مخصص",      color: "text-rose-400",    grad: "from-rose-500 to-pink-600" },
 };
 
 // ── Urgency config ─────────────────────────────────────────────────────────────
@@ -63,7 +73,18 @@ type Order = {
   wilaya: string;
   dispatchedAt: string;
   notes: string | null;
+  task: string | null;
   adminNote: string | null;
+  clientName: string | null;
+  commune: string | null;
+  budgetMin: number | null;
+  budgetMax: number | null;
+  preferredDate: string | null;
+  attachments: string[];
+  providerResponse: string;
+  providerResponseDeadline: string | null;
+  quotedPrice: number | null;
+  paymentStatus: string;
 };
 
 const mapOrders = (rows: Awaited<ReturnType<typeof getProviderBookings>>) =>
@@ -78,7 +99,18 @@ const mapOrders = (rows: Awaited<ReturnType<typeof getProviderBookings>>) =>
       wilaya: b.wilaya ? getWilayaName(b.wilaya) : "غير محدد",
       dispatchedAt: b.created_at,
       notes: b.notes ?? null,
+      task: b.task ?? null,
       adminNote: b.notes ?? b.listings?.title ?? "مهمة جديدة",
+      clientName: b.profiles?.full_name ?? null,
+      commune: b.commune ?? null,
+      budgetMin: b.budget_min ?? null,
+      budgetMax: b.budget_max ?? null,
+      preferredDate: b.preferred_date ?? null,
+      attachments: b.attachments ?? [],
+      providerResponse: b.provider_response ?? "NONE",
+      providerResponseDeadline: b.provider_response_deadline ?? null,
+      quotedPrice: b.quoted_price ?? null,
+      paymentStatus: b.payment_status ?? "UNPAID",
     }));
 
 // ── Status timeline config ─────────────────────────────────────────────────────
@@ -91,6 +123,20 @@ const STATUS_LABEL: Record<string, string> = {
   COMPLETED:   "مكتمل",
   CANCELLED:   "ملغى",
 };
+
+/**
+ * Human-readable time remaining for an assignment deadline. Module scope keeps
+ * the clock read out of the component render path; the label refreshes
+ * whenever orders are re-fetched (every 30 seconds).
+ */
+function formatTimeLeft(deadline: string | null) {
+  if (!deadline) return null;
+  const remaining = new Date(deadline).getTime() - Date.now();
+  if (remaining <= 0) return "انتهت المهلة";
+  const minutes = Math.ceil(remaining / 60000);
+  if (minutes < 60) return `${minutes} دقيقة`;
+  return `${Math.ceil(minutes / 60)} ساعة`;
+}
 
 export default function WorkerDispatchInbox() {
   const mounted = useSyncExternalStore(
@@ -136,15 +182,25 @@ export default function WorkerDispatchInbox() {
 
   const pending = orders.filter((o) => o.status === "DISPATCHED" || o.status === "PENDING").length;
 
-  const handleAction = async (id: string, action: "start" | "complete" | "decline") => {
+  const handleAction = async (
+    id: string,
+    action: "start" | "complete" | "accept" | "decline"
+  ) => {
     setActionLoading(id + action);
     setActionError(null);
     const previous = orders;
     try {
-      const status =
-        action === "start" ? "IN_PROGRESS" :
-        action === "complete" ? "COMPLETED" :
-        "CANCELLED";
+      // Accepting or declining is an assignment response: it records the
+      // provider's decision and starts the work clock. Declining releases the
+      // request back to the admin queue instead of cancelling it outright.
+      if (action === "accept" || action === "decline") {
+        await respondToAssignment(id, action === "accept");
+        await loadOrders();
+        setExpanded(null);
+        return;
+      }
+
+      const status = action === "start" ? "IN_PROGRESS" : "COMPLETED";
       // The action returns false when the booking moved on (reassigned,
       // cancelled, or already completed by someone else). Only then is it
       // safe to show the new status locally.
@@ -155,11 +211,11 @@ export default function WorkerDispatchInbox() {
         return;
       }
       setOrders((prev) => prev.map((o) => (o.id === id ? { ...o, status } : o)));
-      if (action !== "decline") setExpanded(null);
+      setExpanded(null);
     } catch (err) {
       console.error(err);
       setOrders(previous);
-      setActionError("حدث خطأ أثناء تحديث الطلب. حاول مجدداً.");
+      setActionError(err instanceof Error ? err.message : "حدث خطأ أثناء تحديث الطلب. حاول مجدداً.");
     } finally {
       setActionLoading(null);
     }
@@ -330,6 +386,30 @@ export default function WorkerDispatchInbox() {
                   >
                     <div className="px-5 pb-5 space-y-5 border-t border-[var(--border)] pt-5">
 
+                      {/* Assignment response window */}
+                      {order.status === "DISPATCHED" && order.providerResponse !== "ACCEPTED" && (
+                        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-500/30 bg-amber-500/5 p-4">
+                          <div className="flex items-center gap-2 text-sm font-bold text-amber-500">
+                            <Timer size={16} />
+                            {order.providerResponse === "PENDING"
+                              ? "بانتظار ردّك على هذه المهمة"
+                              : "ردّك السابق انتهى — المهمة عادت للإدارة"}
+                          </div>
+                          {order.providerResponse === "PENDING" && (
+                            <span className="text-xs font-bold text-amber-500">
+                              المتبقي: {formatTimeLeft(order.providerResponseDeadline) ?? "—"}
+                            </span>
+                          )}
+                        </div>
+                      )}
+
+                      {order.providerResponse === "ACCEPTED" && order.status === "DISPATCHED" && (
+                        <div className="flex items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-4 text-sm font-bold text-emerald-500">
+                          <CheckCircle2 size={16} />
+                          قبلت المهمة — يمكنك البدء الآن
+                        </div>
+                      )}
+
                       {/* Admin message (icon-based label only, no freetext from client) */}
                       <div className="flex items-center gap-3 bg-[var(--secondary)]/50 rounded-xl p-4">
                         <div className={`p-2 rounded-lg bg-gradient-to-br ${svc.grad}`}>
@@ -341,11 +421,88 @@ export default function WorkerDispatchInbox() {
                         </div>
                       </div>
 
-                      {/* Address */}
-                      <div className="flex items-center gap-3 text-sm text-[var(--muted)]">
-                        <MapPin size={16} className="text-[var(--primary)] shrink-0" />
-                        <span>{order.address}</span>
+                      {/* Location & request data */}
+                      <div className="grid grid-cols-1 gap-2 text-sm text-[var(--muted)] sm:grid-cols-2">
+                        <div className="flex items-center gap-2">
+                          <MapPin size={16} className="shrink-0 text-[var(--primary)]" />
+                          <span>
+                            {order.address}
+                            {order.commune ? ` — ${order.commune}` : ""}
+                          </span>
+                        </div>
+                        {order.preferredDate && (
+                          <div className="flex items-center gap-2">
+                            <CalendarDays size={16} className="shrink-0 text-[var(--primary)]" />
+                            <span>التاريخ المفضل: {new Date(order.preferredDate).toLocaleDateString("ar-DZ")}</span>
+                          </div>
+                        )}
+                        {(order.budgetMin !== null || order.budgetMax !== null) && (
+                          <div className="flex items-center gap-2">
+                            <Wallet size={16} className="shrink-0 text-[var(--primary)]" />
+                            <span>
+                              الميزانية:{" "}
+                              {order.budgetMin !== null && order.budgetMax !== null
+                                ? `${new Intl.NumberFormat("ar-DZ").format(order.budgetMin)} — ${new Intl.NumberFormat("ar-DZ").format(order.budgetMax)} دج`
+                                : order.budgetMax !== null
+                                ? `حتى ${new Intl.NumberFormat("ar-DZ").format(order.budgetMax)} دج`
+                                : `من ${new Intl.NumberFormat("ar-DZ").format(order.budgetMin ?? 0)} دج`}
+                            </span>
+                          </div>
+                        )}
+                        {order.clientName && (
+                          <div className="flex items-center gap-2">
+                            <FileText size={16} className="shrink-0 text-[var(--primary)]" />
+                            <span>العميل: {order.clientName}</span>
+                          </div>
+                        )}
+                        {order.quotedPrice !== null && (
+                          <div className="flex items-center gap-2">
+                            <Wallet size={16} className="shrink-0 text-[var(--primary)]" />
+                            <span>السعر المتفق عليه: {new Intl.NumberFormat("ar-DZ").format(order.quotedPrice)} دج</span>
+                          </div>
+                        )}
+                        {order.paymentStatus === "PAID" && (
+                          <div className="flex items-center gap-2 text-emerald-500">
+                            <CheckCircle2 size={16} className="shrink-0" />
+                            <span>الطلب مدفوع</span>
+                          </div>
+                        )}
                       </div>
+
+                      {order.notes && (
+                        <div className="rounded-xl bg-[var(--secondary)] p-4">
+                          <p className="mb-1 flex items-center gap-1.5 text-xs text-[var(--muted)]">
+                            <FileText size={12} />
+                            تفاصيل الطلب
+                          </p>
+                          <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-[var(--foreground)]">
+                            {order.notes}
+                          </p>
+                        </div>
+                      )}
+
+                      {order.attachments.length > 0 && (
+                        <div className="flex flex-wrap gap-2">
+                          {order.attachments.map((url) => (
+                            <a
+                              key={url}
+                              href={url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="relative block h-20 w-20 overflow-hidden rounded-xl border border-[var(--border)]"
+                            >
+                              <Image
+                                src={url}
+                                alt="مرفق الطلب"
+                                fill
+                                unoptimized
+                                className="object-cover"
+                                sizes="80px"
+                              />
+                            </a>
+                          ))}
+                        </div>
+                      )}
 
                       {/* Progress stepper */}
                       {stepIdx >= 0 && (
@@ -372,26 +529,40 @@ export default function WorkerDispatchInbox() {
                       )}
 
                       {/* Action Buttons */}
-                      {(order.status === "DISPATCHED" || order.status === "PENDING") && (
+                      {order.status === "DISPATCHED" && order.providerResponse !== "ACCEPTED" && (
                         <div className="flex gap-3 pt-1">
                           <button
-                            onClick={() => handleAction(order.id, "start")}
-                            disabled={!!actionLoading}
-                            className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl bg-[var(--primary)] text-[var(--primary-foreground)] font-black text-sm hover:opacity-90 transition-all shadow-lg shadow-[var(--primary)]/20"
+                            onClick={() => handleAction(order.id, "accept")}
+                            disabled={!!actionLoading || formatTimeLeft(order.providerResponseDeadline) === "انتهت المهلة"}
+                            className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl bg-[var(--primary)] text-[var(--primary-foreground)] font-black text-sm hover:opacity-90 transition-all shadow-lg shadow-[var(--primary)]/20 disabled:opacity-50"
                           >
-                            {actionLoading === order.id + "start"
+                            {actionLoading === order.id + "accept"
                               ? <Loader2 size={16} className="animate-spin" />
-                              : <Play size={16} />}
-                            ابدأ العمل
+                              : <CheckCircle2 size={16} />}
+                            قبول المهمة
                           </button>
                           <button
                             onClick={() => handleAction(order.id, "decline")}
                             disabled={!!actionLoading}
-                            className="px-5 py-3 rounded-xl border-2 border-red-500/30 text-red-400 hover:bg-red-500/10 transition-all font-bold text-sm"
+                            className="flex items-center justify-center gap-2 px-5 py-3 rounded-xl border-2 border-red-500/30 text-red-400 hover:bg-red-500/10 transition-all font-bold text-sm disabled:opacity-50"
                           >
                             {actionLoading === order.id + "decline" ? <Loader2 size={16} className="animate-spin" /> : <X size={16} />}
+                            اعتذار
                           </button>
                         </div>
+                      )}
+
+                      {order.status === "DISPATCHED" && order.providerResponse === "ACCEPTED" && (
+                        <button
+                          onClick={() => handleAction(order.id, "start")}
+                          disabled={!!actionLoading}
+                          className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-[var(--primary)] text-[var(--primary-foreground)] font-black text-sm hover:opacity-90 transition-all shadow-lg shadow-[var(--primary)]/20 disabled:opacity-50"
+                        >
+                          {actionLoading === order.id + "start"
+                            ? <Loader2 size={16} className="animate-spin" />
+                            : <Play size={16} />}
+                          ابدأ العمل
+                        </button>
                       )}
 
                       {order.status === "IN_PROGRESS" && (

@@ -28,7 +28,11 @@ import {
   Shield,
   RefreshCw,
   Briefcase,
+  FileText,
   X,
+  Wallet,
+  CalendarDays,
+  BadgeDollarSign,
 } from "lucide-react";
 import Image from "next/image";
 import { WILAYAS, getWilayaName } from "@/lib/wilayas";
@@ -40,6 +44,7 @@ import {
   assignRequestToProvider,
   declineRequest,
   cancelDispatch,
+  sendOffer,
 } from "@/lib/db";
 import { useAdminGuard } from "@/lib/use-admin";
 
@@ -57,7 +62,13 @@ const SERVICES = [
   { id: "materials",   icon: Package,     label: "توريد مواد",     grad: "from-teal-500 to-green-600" },
   { id: "safety",      icon: HardHat,     label: "إشراف وسلامة",  grad: "from-orange-400 to-red-500" },
   { id: "hvac",        icon: Thermometer, label: "تكييف وتدفئة",  grad: "from-cyan-400 to-teal-500" },
+  { id: "custom",      icon: FileText,    label: "طلب مخصص",      grad: "from-rose-500 to-pink-600" },
 ];
+
+// Custom requests are not tied to a provider specialty, so the admin must see
+// every provider and choose who fulfils them.
+const specialtyFilter = (serviceType: string | null | undefined) =>
+  serviceType && serviceType !== "custom" ? serviceType : undefined;
 
 const SERVICE_MAP = Object.fromEntries(SERVICES.map((s) => [s.id, s]));
 
@@ -77,6 +88,18 @@ const STATUS_CONFIG: Record<string, { label: string; color: string; bg: string }
 // Types inferred from DB functions
 type Provider = Awaited<ReturnType<typeof getAvailableProviders>>[number];
 type HistoryItem = Awaited<ReturnType<typeof getDispatchHistory>>[number];
+type PendingRequest = Awaited<ReturnType<typeof getPendingRequests>>[number];
+
+const formatAge = (minutes: number) => {
+  if (minutes < 60) return `${minutes} دقيقة`;
+  if (minutes < 1440) return `${Math.floor(minutes / 60)} ساعة`;
+  return `${Math.floor(minutes / 1440)} يوم`;
+};
+
+const formatPrice = (value: number | null | undefined) =>
+  value === null || value === undefined
+    ? null
+    : `${new Intl.NumberFormat("ar-DZ").format(value)} دج`;
 
 export function AdminDispatchClient() {
   const { isAdmin, loading: guardLoading } = useAdminGuard();
@@ -108,21 +131,22 @@ export function AdminDispatchClient() {
   const [showHistory, setShowHistory] = useState(true);
   const [refreshKey, setRefreshKey] = useState(0);
   const [activeTab, setActiveTab] = useState<'dispatch' | 'requests'>('dispatch');
-  const [pendingRequests, setPendingRequests] = useState<{
-    id: string; service_type: string; urgency: string;
-    wilaya: number; notes: string | null; created_at: string;
-    client: { name: string; phone: string | null } | null;
-  }[]>([]);
+  const [pendingRequests, setPendingRequests] = useState<PendingRequest[]>([]);
+  const [requestFilter, setRequestFilter] = useState<'all' | 'asap' | 'urgent' | 'normal'>('all');
+  const [requestSearch, setRequestSearch] = useState("");
   const [assigning, setAssigning] = useState<string | null>(null);
-  const [targetRequest, setTargetRequest] = useState<{
-    id: string; service_type: string; urgency: string; wilaya: number;
-    notes: string | null; created_at: string;
-    client: { name: string; phone: string | null } | null;
-  } | null>(null);
+  const [targetRequest, setTargetRequest] = useState<PendingRequest | null>(null);
   const [pendingConfirm, setPendingConfirm] = useState<{
     requestId: string; providerId: string; providerName: string;
     serviceType: string; clientName: string;
   } | null>(null);
+  const [offerTarget, setOfferTarget] = useState<PendingRequest | null>(null);
+  const [offerPrice, setOfferPrice] = useState("");
+  const [offerMessage, setOfferMessage] = useState("");
+  const [offerSubmitting, setOfferSubmitting] = useState(false);
+  const [rejectTarget, setRejectTarget] = useState<PendingRequest | null>(null);
+  const [rejectReason, setRejectReason] = useState("");
+  const [rejectSubmitting, setRejectSubmitting] = useState(false);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const pendingResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -141,7 +165,7 @@ export function AdminDispatchClient() {
       try {
         const [prov, hist] = await Promise.all([
           getAvailableProviders(
-            selectedService ?? undefined,
+            specialtyFilter(selectedService),
             selectedWilaya !== "" ? Number(selectedWilaya) : undefined,
           ),
           getDispatchHistory(40),
@@ -164,19 +188,28 @@ export function AdminDispatchClient() {
   useEffect(() => {
     if (!isAdmin) return;
     let cancelled = false;
-    getPendingRequests()
-      .then((rows) => {
+
+    const loadRequests = async () => {
+      try {
+        const rows = await getPendingRequests();
         if (cancelled) return;
         setPendingRequests(rows);
         setRequestsError(null);
-      })
-      .catch((err) => {
+      } catch (err) {
         console.error('[dispatch] failed to load pending requests', err);
         // Never leave the list empty on failure: "no pending requests" would
         // be a false, dangerous claim while requests are still waiting.
         if (!cancelled) setRequestsError("تعذّر تحميل الطلبات المعلقة. حاول تحديث الصفحة.");
-      });
-    return () => { cancelled = true; };
+      }
+    };
+
+    loadRequests();
+    // Keep the admin queue live: new requests arrive without a manual refresh.
+    const interval = setInterval(loadRequests, 30_000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
   }, [mounted, isAdmin, refreshKey]);
 
   const filteredProviders = providers.filter((p) => {
@@ -185,6 +218,18 @@ export function AdminDispatchClient() {
   });
 
   const canSend = selectedService && selectedWorker && selectedWilaya !== "";
+
+  const visibleRequests = pendingRequests.filter((req) => {
+    if (requestFilter !== "all" && req.urgency !== requestFilter) return false;
+    if (!requestSearch.trim()) return true;
+    const query = requestSearch.trim();
+    return (
+      (req.client?.name ?? "").includes(query) ||
+      (req.notes ?? "").includes(query) ||
+      (req.commune ?? "").includes(query) ||
+      getWilayaName(req.wilaya).includes(query)
+    );
+  });
 
   if (guardLoading) {
     return (
@@ -214,7 +259,7 @@ export function AdminDispatchClient() {
 
         // Refresh history & providers
         const [prov, hist] = await Promise.all([
-          getAvailableProviders(selectedService ?? undefined, Number(selectedWilaya) || undefined),
+          getAvailableProviders(specialtyFilter(selectedService), Number(selectedWilaya) || undefined),
           getDispatchHistory(40),
         ]);
         setProviders(prov);
@@ -683,150 +728,451 @@ export function AdminDispatchClient() {
             <h3 className="text-lg font-black text-[var(--foreground)] mb-2">{requestsError}</h3>
             <p className="text-sm text-[var(--muted)]">لا يمكن عرض حالة الطلبات الآن. لم يتم تأكيد خلو القائمة.</p>
           </div>
-        ) : pendingRequests.length === 0 ? (
-          <div className="bg-[var(--card)] border border-[var(--border)] rounded-2xl p-12 text-center">
-            <Inbox size={48} className="mx-auto text-[var(--muted)] mb-4 opacity-40" />
-            <h3 className="text-lg font-black text-[var(--foreground)] mb-2">لا توجد طلبات معلقة</h3>
-            <p className="text-sm text-[var(--muted)]">عندما يرسل العملاء طلبات خدمات من صفحة الحرفيين، ستظهر هنا</p>
-          </div>
         ) : (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            {pendingRequests.map((req) => {
-              const svc = SERVICES.find(s => s.id === req.service_type);
-              const urgency = URGENCY.find(u => u.id === req.urgency);
-              const UrgencyIcon = urgency?.icon ?? Clock;
-              return (
-                <div key={req.id} className="bg-[var(--card)] border border-[var(--border)] rounded-2xl p-5 space-y-4">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      {svc && (
-                        <div className={`p-2.5 rounded-xl bg-gradient-to-br ${svc.grad}`}>
-                          <svc.icon size={18} className="text-white" />
-                        </div>
-                      )}
-                      <div>
-                        <div className="font-bold text-[var(--foreground)]">{svc?.label ?? req.service_type}</div>
-                        {req.client && (
-                          <div className="text-xs text-[var(--muted)] mt-0.5 flex items-center gap-2">
-                            <span>{req.client.name}</span>
-                            {req.client.phone && (
-                              <a
-                                href={`tel:${req.client.phone}`}
-                                dir="ltr"
-                                className="text-[var(--primary)] hover:underline font-bold"
-                              >
-                                {req.client.phone}
-                              </a>
+          <>
+            <div className="bg-[var(--card)] border border-[var(--border)] rounded-2xl p-4 flex flex-col xl:flex-row gap-3 xl:items-center xl:justify-between">
+              <div className="flex flex-wrap gap-2" role="group" aria-label="تصفية حسب الاستعجال">
+                {([
+                  { id: "all", label: "الكل", count: pendingRequests.length },
+                  { id: "asap", label: "فوري جداً", count: pendingRequests.filter(r => r.urgency === "asap").length },
+                  { id: "urgent", label: "عاجل", count: pendingRequests.filter(r => r.urgency === "urgent").length },
+                  { id: "normal", label: "عادي", count: pendingRequests.filter(r => r.urgency === "normal").length },
+                ] as const).map((filter) => (
+                  <button
+                    key={filter.id}
+                    onClick={() => setRequestFilter(filter.id)}
+                    className={[
+                      "px-3 py-2 rounded-xl text-xs font-bold transition-all border",
+                      requestFilter === filter.id
+                        ? "bg-[var(--primary)] text-[var(--primary-foreground)] border-[var(--primary)]"
+                        : "border-[var(--border)] text-[var(--muted)] hover:bg-[var(--secondary)]",
+                    ].join(" ")}
+                  >
+                    {filter.label} ({filter.count})
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  value={requestSearch}
+                  onChange={(event) => setRequestSearch(event.target.value)}
+                  placeholder="ابحث باسم العميل، الولاية، أو نص الطلب"
+                  className="w-full xl:w-72 rounded-xl border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 text-sm outline-none focus:border-[var(--primary)]"
+                />
+                <span className="hidden xl:inline text-[10px] text-[var(--muted)] whitespace-nowrap">
+                  تحديث تلقائي كل 30 ثانية
+                </span>
+              </div>
+            </div>
+
+            {pendingRequests.length === 0 ? (
+              <div className="bg-[var(--card)] border border-[var(--border)] rounded-2xl p-12 text-center">
+                <Inbox size={48} className="mx-auto text-[var(--muted)] mb-4 opacity-40" />
+                <h3 className="text-lg font-black text-[var(--foreground)] mb-2">لا توجد طلبات معلقة</h3>
+                <p className="text-sm text-[var(--muted)]">عندما يرسل العملاء طلبات خدمات أو طلبات مخصصة، ستظهر هنا</p>
+              </div>
+            ) : visibleRequests.length === 0 ? (
+              <div className="bg-[var(--card)] border border-[var(--border)] rounded-2xl p-10 text-center">
+                <p className="text-sm text-[var(--muted)]">لا توجد طلبات تطابق هذا الفلتر.</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                {visibleRequests.map((req) => {
+                  const svc = SERVICES.find(s => s.id === req.service_type);
+                  const urgency = URGENCY.find(u => u.id === req.urgency);
+                  const UrgencyIcon = urgency?.icon ?? Clock;
+                  const budget =
+                    req.budget_min !== null && req.budget_max !== null
+                      ? `${formatPrice(req.budget_min)} — ${formatPrice(req.budget_max)}`
+                      : req.budget_max !== null
+                      ? `حتى ${formatPrice(req.budget_max)}`
+                      : req.budget_min !== null
+                      ? `من ${formatPrice(req.budget_min)}`
+                      : null;
+                  const isOld = req.age_minutes >= 1440;
+                  return (
+                    <div
+                      key={req.id}
+                      className={[
+                        "bg-[var(--card)] border rounded-2xl p-5 space-y-4",
+                        req.offer_status === "ACCEPTED"
+                          ? "border-emerald-500/40"
+                          : "border-[var(--border)]",
+                      ].join(" ")}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex items-center gap-3">
+                          {svc && (
+                            <div className={`p-2.5 rounded-xl bg-gradient-to-br ${svc.grad}`}>
+                              <svc.icon size={18} className="text-white" />
+                            </div>
+                          )}
+                          <div>
+                            <div className="font-bold text-[var(--foreground)]">{svc?.label ?? req.service_type}</div>
+                            {req.client && (
+                              <div className="text-xs text-[var(--muted)] mt-0.5 flex items-center gap-2">
+                                <span>{req.client.name}</span>
+                                {req.client.phone && (
+                                  <a
+                                    href={`tel:${req.client.phone}`}
+                                    dir="ltr"
+                                    className="text-[var(--primary)] hover:underline font-bold"
+                                  >
+                                    {req.client.phone}
+                                  </a>
+                                )}
+                              </div>
                             )}
                           </div>
+                        </div>
+                        <div className="flex flex-col items-end gap-1.5">
+                          <div className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold ${urgency?.bg ?? 'bg-blue-400/10'} ${urgency?.color ?? 'text-blue-400'}`}>
+                            <UrgencyIcon size={12} />
+                            {urgency?.label ?? 'عادي'}
+                          </div>
+                          <span className={isOld ? "text-[10px] font-bold text-red-400" : "text-[10px] text-[var(--muted)]"}>
+                            منتظر منذ {formatAge(req.age_minutes)}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-3 text-xs text-[var(--muted)]">
+                        <span className="flex items-center gap-1">
+                          <MapPin size={12} />
+                          {getWilayaName(req.wilaya)}
+                          {req.commune ? ` — ${req.commune}` : ""}
+                        </span>
+                        {req.preferred_date && (
+                          <span className="flex items-center gap-1">
+                            <CalendarDays size={12} />
+                            {new Date(req.preferred_date).toLocaleDateString("ar-DZ")}
+                          </span>
+                        )}
+                        <span>
+                          {mounted ? new Date(req.created_at).toLocaleDateString("ar-DZ", {
+                            day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
+                          }) : "..."}
+                        </span>
+                      </div>
+
+                      {budget && (
+                        <div className="flex items-center gap-1.5 text-xs text-[var(--muted)]">
+                          <Wallet size={12} />
+                          الميزانية: {budget}
+                        </div>
+                      )}
+
+                      {/* Customer notes get their own full-width line so long Arabic
+                          text is never clipped mid-word. */}
+                      {req.notes && (
+                        <p className="text-xs text-[var(--muted)] bg-[var(--secondary)] rounded-lg p-3 leading-relaxed whitespace-pre-wrap break-words">
+                          {req.notes}
+                        </p>
+                      )}
+
+                      {req.attachments.length > 0 && (
+                        <div className="flex flex-wrap gap-2">
+                          {req.attachments.map((url) => (
+                            <a
+                              key={url}
+                              href={url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="relative block h-16 w-16 overflow-hidden rounded-lg border border-[var(--border)]"
+                            >
+                              <Image src={url} alt="مرفق الطلب" fill className="object-cover" sizes="64px" />
+                            </a>
+                          ))}
+                        </div>
+                      )}
+
+                      <div className="flex flex-wrap gap-2 text-[10px] font-bold">
+                        {req.offer_status === "OFFERED" && (
+                          <span className="rounded-full bg-amber-500/10 px-2.5 py-1 text-amber-600 dark:text-amber-400">
+                            عرض بانتظار رد العميل
+                          </span>
+                        )}
+                        {req.offer_status === "ACCEPTED" && (
+                          <span className="rounded-full bg-emerald-500/10 px-2.5 py-1 text-emerald-600 dark:text-emerald-400">
+                            قبل العميل العرض
+                          </span>
+                        )}
+                        {req.offer_status === "DECLINED" && (
+                          <span className="rounded-full bg-red-500/10 px-2.5 py-1 text-red-500">
+                            رفض العميل العرض
+                          </span>
+                        )}
+                        {formatPrice(req.quoted_price) && (
+                          <span className="rounded-full bg-[var(--secondary)] px-2.5 py-1 text-[var(--foreground)]">
+                            العرض: {formatPrice(req.quoted_price)}
+                          </span>
+                        )}
+                        <span
+                          className={[
+                            "rounded-full px-2.5 py-1",
+                            req.payment_status === "PAID"
+                              ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                              : "bg-[var(--secondary)] text-[var(--muted)]",
+                          ].join(" ")}
+                        >
+                          {req.payment_status === "PAID" ? "مدفوع" : "غير مدفوع"}
+                        </span>
+                        {req.offer_status === "ACCEPTED" && req.payment_status !== "PAID" && (
+                          <span className="rounded-full bg-amber-500/10 px-2.5 py-1 text-amber-600 dark:text-amber-400">
+                            بانتظار الدفع
+                          </span>
                         )}
                       </div>
+
+                      <div className="flex flex-wrap gap-2 pt-2 border-t border-[var(--border)]">
+                        <button
+                          onClick={() => {
+                            setOfferTarget(req);
+                            setOfferPrice(req.quoted_price !== null ? String(req.quoted_price) : "");
+                            setOfferMessage(req.offer_message ?? "");
+                            setError(null);
+                          }}
+                          className="flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl border border-[var(--primary)]/40 text-[var(--primary)] font-bold text-sm hover:bg-[var(--primary)]/10 transition-all"
+                        >
+                          <BadgeDollarSign size={14} />
+                          {req.offer_status === "NONE" ? "تقديم عرض" : "تعديل العرض"}
+                        </button>
+                        <button
+                          onClick={() => {
+                            setActiveTab('dispatch');
+                            setError(null);
+                            if (svc) setSelectedService(svc.id);
+                            setSelectedUrgency(req.urgency);
+                            setSelectedWilaya(req.wilaya);
+                            setNotes(req.notes ?? "");
+                            setTargetRequest(req);
+                          }}
+                          className="flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl bg-[var(--primary)] text-[var(--primary-foreground)] font-bold text-sm hover:opacity-90 transition-all"
+                        >
+                          <Send size={14} />
+                          إرسال إلى عامل
+                        </button>
+                        {req.service_type !== "custom" && (
+                        <button
+                          disabled={assigning === req.id}
+                          onClick={async () => {
+                            setAssigning(req.id);
+                            setError(null);
+                            try {
+                              const providers = await getAvailableProviders(specialtyFilter(req.service_type), req.wilaya);
+                              const available = providers.find(p => p.available);
+                              if (!available) {
+                                setError("لا يوجد عمال متاحون لهذه الخدمة");
+                                return;
+                              }
+                              // Ask before assigning — the worker is notified immediately
+                              // and there is no undo from the worker side.
+                              setPendingConfirm({
+                                requestId: req.id,
+                                providerId: available.id,
+                                providerName: available.name,
+                                serviceType: req.service_type,
+                                clientName: req.client?.name ?? '',
+                              });
+                            } catch {
+                              setError("حدث خطأ أثناء جلب العمال المتاحين");
+                            } finally {
+                              setAssigning(null);
+                            }
+                          }}
+                          className="flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl border border-[var(--border)] text-[var(--muted)] font-bold text-sm hover:bg-[var(--primary)]/5 hover:text-[var(--foreground)] transition-all disabled:opacity-50"
+                        >
+                          {assigning === req.id ? (
+                            <Loader2 size={14} className="animate-spin" />
+                          ) : (
+                            <CheckCircle2 size={14} />
+                          )}
+                          تعيين تلقائي
+                        </button>
+                        )}
+                        <button
+                          disabled={assigning === req.id}
+                          onClick={() => {
+                            setRejectTarget(req);
+                            setRejectReason("");
+                            setError(null);
+                          }}
+                          className="flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl border border-red-500/30 text-red-400 font-bold text-sm hover:bg-red-500/10 transition-all disabled:opacity-50"
+                        >
+                          <X size={14} />
+                          رفض
+                        </button>
+                      </div>
                     </div>
-                    <div className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold ${urgency?.bg ?? 'bg-blue-400/10'} ${urgency?.color ?? 'text-blue-400'}`}>
-                      <UrgencyIcon size={12} />
-                      {urgency?.label ?? 'عادي'}
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-3 text-xs text-[var(--muted)]">
-                    <span className="flex items-center gap-1">
-                      <MapPin size={12} />
-                      {getWilayaName(req.wilaya)}
-                    </span>
-                    <span>
-                      {mounted ? new Date(req.created_at).toLocaleDateString("ar-DZ", {
-                        day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
-                      }) : "..."}
-                    </span>
-                  </div>
-
-                  {/* Customer notes get their own full-width line so long Arabic
-                      text is never clipped mid-word. */}
-                  {req.notes && (
-                    <p className="text-xs text-[var(--muted)] bg-[var(--secondary)] rounded-lg p-3 leading-relaxed whitespace-pre-wrap break-words">
-                      {req.notes}
-                    </p>
-                  )}
-
-                  <div className="flex gap-2 pt-2 border-t border-[var(--border)]">
-                    <button
-                      onClick={() => {
-                        setActiveTab('dispatch');
-                        setError(null);
-                        if (svc) setSelectedService(svc.id);
-                        setSelectedUrgency(req.urgency);
-                        setSelectedWilaya(req.wilaya);
-                        setNotes(req.notes ?? "");
-                        setTargetRequest(req);
-                      }}
-                      className="flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl bg-[var(--primary)] text-[var(--primary-foreground)] font-bold text-sm hover:opacity-90 transition-all"
-                    >
-                      <Send size={14} />
-                      إرسال إلى عامل
-                    </button>
-                    <button
-                      disabled={assigning === req.id}
-                      onClick={async () => {
-                        setAssigning(req.id);
-                        setError(null);
-                        try {
-                          const providers = await getAvailableProviders(req.service_type, req.wilaya);
-                          const available = providers.find(p => p.available);
-                          if (!available) {
-                            setError("لا يوجد عمال متاحون لهذه الخدمة");
-                            return;
-                          }
-                          // Ask before assigning — the worker is notified immediately
-                          // and there is no undo from the worker side.
-                          setPendingConfirm({
-                            requestId: req.id,
-                            providerId: available.id,
-                            providerName: available.name,
-                            serviceType: req.service_type,
-                            clientName: req.client?.name ?? '',
-                          });
-                        } catch {
-                          setError("حدث خطأ أثناء جلب العمال المتاحين");
-                        } finally {
-                          setAssigning(null);
-                        }
-                      }}
-                      className="flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl border border-[var(--border)] text-[var(--muted)] font-bold text-sm hover:bg-[var(--primary)]/5 hover:text-[var(--foreground)] transition-all disabled:opacity-50"
-                    >
-                      {assigning === req.id ? (
-                        <Loader2 size={14} className="animate-spin" />
-                      ) : (
-                        <CheckCircle2 size={14} />
-                      )}
-                      تعيين تلقائي
-                    </button>
-                    <button
-                      disabled={assigning === req.id}
-                      onClick={async () => {
-                        setAssigning(req.id);
-                        setError(null);
-                        try {
-                          await declineRequest(req.id);
-                          setRefreshKey(k => k + 1);
-                        } catch {
-                          setError("حدث خطأ أثناء رفض الطلب");
-                        } finally {
-                          setAssigning(null);
-                        }
-                      }}
-                      className="flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl border border-red-500/30 text-red-400 font-bold text-sm hover:bg-red-500/10 transition-all disabled:opacity-50"
-                    >
-                      <X size={14} />
-                      رفض
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+                  );
+                })}
+              </div>
+            )}
+          </>
         )}
       </div>
       )}
+
+      {/* ── Offer / quote modal ──────────────────────────────────── */}
+      <AnimatePresence>
+        {offerTarget && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4"
+            onClick={() => { if (!offerSubmitting) setOfferTarget(null); }}
+          >
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-label="تقديم عرض للعميل"
+              onClick={(event) => event.stopPropagation()}
+              className="bg-[var(--card)] border border-[var(--border)] rounded-2xl p-6 max-w-lg w-full space-y-4"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h3 className="font-black text-[var(--foreground)] text-lg">تقديم عرض للعميل</h3>
+                  <p className="mt-1 text-xs text-[var(--muted)]">
+                    {offerTarget.client?.name ? `إلى ${offerTarget.client.name}` : "طلب مخصص"} — سيصل للعميل إشعار فوري.
+                  </p>
+                </div>
+                <button
+                  onClick={() => setOfferTarget(null)}
+                  disabled={offerSubmitting}
+                  className="rounded-lg p-1 text-[var(--muted)] hover:bg-[var(--secondary)] disabled:opacity-50"
+                  aria-label="إغلاق"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              <label className="block space-y-1.5">
+                <span className="text-xs font-bold text-[var(--foreground)]">السعر (دج) *</span>
+                <input
+                  type="number"
+                  min={1}
+                  step="1"
+                  value={offerPrice}
+                  onChange={(event) => setOfferPrice(event.target.value)}
+                  className="w-full rounded-xl border border-[var(--border)] bg-[var(--secondary)] px-3 py-2.5 text-sm outline-none focus:border-[var(--primary)]"
+                  placeholder="مثال: 15000"
+                />
+              </label>
+
+              <label className="block space-y-1.5">
+                <span className="text-xs font-bold text-[var(--foreground)]">رسالة / تفاصيل العرض</span>
+                <textarea
+                  value={offerMessage}
+                  onChange={(event) => setOfferMessage(event.target.value)}
+                  rows={4}
+                  className="w-full resize-none rounded-xl border border-[var(--border)] bg-[var(--secondary)] px-3 py-2.5 text-sm outline-none focus:border-[var(--primary)]"
+                  placeholder="ما الذي يشمله السعر؟ المدة؟ أي بدائل؟"
+                />
+              </label>
+
+              <div className="flex gap-3 pt-2">
+                <button
+                  disabled={offerSubmitting || !offerPrice || Number(offerPrice) <= 0}
+                  onClick={async () => {
+                    if (!offerTarget) return;
+                    setOfferSubmitting(true);
+                    setError(null);
+                    try {
+                      await sendOffer(offerTarget.id, Number(offerPrice), offerMessage);
+                      setSuccessMessage("تم إرسال العرض إلى العميل");
+                      setOfferTarget(null);
+                      setRefreshKey((key) => key + 1);
+                    } catch (err) {
+                      setError(err instanceof Error ? err.message : "تعذّر إرسال العرض");
+                    } finally {
+                      setOfferSubmitting(false);
+                    }
+                  }}
+                  className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl bg-[var(--primary)] text-[var(--primary-foreground)] font-bold text-sm hover:opacity-90 transition-all disabled:opacity-50"
+                >
+                  {offerSubmitting ? <Loader2 size={16} className="animate-spin" /> : <BadgeDollarSign size={16} />}
+                  إرسال العرض
+                </button>
+                <button
+                  onClick={() => setOfferTarget(null)}
+                  disabled={offerSubmitting}
+                  className="px-6 py-3 rounded-xl border border-[var(--border)] text-[var(--muted)] font-bold text-sm hover:bg-[var(--secondary)] transition-all disabled:opacity-50"
+                >
+                  إلغاء
+                </button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ── Reject with reason modal ─────────────────────────────── */}
+      <AnimatePresence>
+        {rejectTarget && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4"
+            onClick={() => { if (!rejectSubmitting) setRejectTarget(null); }}
+          >
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-label="رفض الطلب"
+              onClick={(event) => event.stopPropagation()}
+              className="bg-[var(--card)] border border-[var(--border)] rounded-2xl p-6 max-w-lg w-full space-y-4"
+            >
+              <h3 className="font-black text-[var(--foreground)] text-lg">رفض الطلب</h3>
+              <p className="text-xs text-[var(--muted)]">
+                سيظهر سبب الرفض للعميل، ويمكنه تعديل الطلب وإعادة إرساله.
+              </p>
+              <label className="block space-y-1.5">
+                <span className="text-xs font-bold text-[var(--foreground)]">سبب الرفض (اختياري)</span>
+                <textarea
+                  value={rejectReason}
+                  onChange={(event) => setRejectReason(event.target.value)}
+                  rows={4}
+                  className="w-full resize-none rounded-xl border border-[var(--border)] bg-[var(--secondary)] px-3 py-2.5 text-sm outline-none focus:border-[var(--primary)]"
+                  placeholder="مثال: الخدمة غير متوفرة حالياً في هذه الولاية."
+                />
+              </label>
+              <div className="flex gap-3 pt-2">
+                <button
+                  disabled={rejectSubmitting}
+                  onClick={async () => {
+                    if (!rejectTarget) return;
+                    setRejectSubmitting(true);
+                    setError(null);
+                    try {
+                      await declineRequest(rejectTarget.id, rejectReason.trim() || undefined);
+                      setSuccessMessage("تم رفض الطلب وإبلاغ العميل بالسبب");
+                      setRejectTarget(null);
+                      setRefreshKey((key) => key + 1);
+                    } catch {
+                      setError("حدث خطأ أثناء رفض الطلب");
+                    } finally {
+                      setRejectSubmitting(false);
+                    }
+                  }}
+                  className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl bg-red-500 text-white font-bold text-sm hover:bg-red-600 transition-all disabled:opacity-50"
+                >
+                  {rejectSubmitting ? <Loader2 size={16} className="animate-spin" /> : <X size={16} />}
+                  تأكيد الرفض
+                </button>
+                <button
+                  onClick={() => setRejectTarget(null)}
+                  disabled={rejectSubmitting}
+                  className="px-6 py-3 rounded-xl border border-[var(--border)] text-[var(--muted)] font-bold text-sm hover:bg-[var(--secondary)] transition-all disabled:opacity-50"
+                >
+                  إلغاء
+                </button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* ── Auto-assign confirmation ─────────────────────────────── */}
       <AnimatePresence>

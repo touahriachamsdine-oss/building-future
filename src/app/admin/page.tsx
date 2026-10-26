@@ -9,7 +9,9 @@ import {
   DollarSign,
   ArrowUpRight,
   Loader2,
-  AlertCircle
+  AlertCircle,
+  Inbox,
+  Timer,
 } from "lucide-react";
 import { 
   AreaChart, 
@@ -91,6 +93,20 @@ export default function AdminOverview() {
       value: formatDzd(stats.totalRevenue),
       detail: `${formatDzd(stats.revenue30d)} خلال 30 يوماً`,
       icon: DollarSign,
+      positive: true,
+    },
+    {
+      title: "طلبات معلقة",
+      value: nf.format(stats.pendingRequests),
+      detail: `${nf.format(stats.pendingCustomRequests)} طلب مخصص`,
+      icon: Inbox,
+      positive: false,
+    },
+    {
+      title: "متوسط الاستجابة",
+      value: stats.avgResponseMinutes > 0 ? `${nf.format(Math.round(stats.avgResponseMinutes))} دقيقة` : "—",
+      detail: "من وصول الطلب حتى التعيين (30 يوماً)",
+      icon: Timer,
       positive: true,
     },
   ];

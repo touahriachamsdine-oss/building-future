@@ -2,9 +2,11 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { signOutAction } from "@/lib/auth";
+import { getAdminPendingCount } from "@/lib/db";
+import { NotificationBell } from "@/components/ui/NotificationBell";
 import {
   LayoutDashboard,
   Users,
@@ -35,11 +37,13 @@ function SidebarContent({
   currentPath,
   onLogout,
   onClose,
+  pendingCount,
 }: {
   links: { title: string; href: string; icon: React.ElementType }[];
   currentPath: string;
   onLogout: () => Promise<void>;
   onClose?: () => void;
+  pendingCount: number;
 }) {
   return (
     <>
@@ -68,6 +72,11 @@ function SidebarContent({
             >
               <Icon size={20} className={cn(isActive ? "text-white" : "text-muted-foreground group-hover:text-primary")} />
               <span className="font-medium">{link.title}</span>
+              {link.href === "/admin/dispatch" && pendingCount > 0 && (
+                <span className="mr-auto min-w-5 rounded-full bg-red-500 px-1.5 py-0.5 text-center text-[10px] font-bold leading-none text-white">
+                  {pendingCount > 99 ? "99+" : pendingCount}
+                </span>
+              )}
             </Link>
           );
         })}
@@ -95,6 +104,22 @@ export default function AdminShell({
   const router = useRouter();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [prevPath, setPrevPath] = useState(pathname);
+  const [pendingCount, setPendingCount] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadCount = () => {
+      getAdminPendingCount()
+        .then((count) => { if (!cancelled) setPendingCount(count); })
+        .catch(() => { /* badge is non-critical */ });
+    };
+    loadCount();
+    const interval = setInterval(loadCount, 30_000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
 
   if (pathname !== prevPath) {
     setPrevPath(pathname);
@@ -114,6 +139,7 @@ export default function AdminShell({
           links={sidebarLinks}
           currentPath={pathname}
           onLogout={handleLogout}
+          pendingCount={pendingCount}
         />
       </aside>
 
@@ -141,6 +167,7 @@ export default function AdminShell({
                 currentPath={pathname}
                 onLogout={handleLogout}
                 onClose={() => setMobileMenuOpen(false)}
+                pendingCount={pendingCount}
               />
             </motion.aside>
           </>
@@ -161,6 +188,7 @@ export default function AdminShell({
              <h2 className="text-xl font-bold text-foreground">أهلاً بك، المشرف</h2>
           </div>
           <div className="flex items-center gap-4">
+             <NotificationBell />
              <div className="w-10 h-10 rounded-full bg-primary/10 border border-primary/20 flex items-center justify-center font-bold text-primary shadow-sm">
                 A
              </div>

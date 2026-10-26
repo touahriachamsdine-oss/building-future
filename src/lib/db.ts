@@ -546,50 +546,81 @@ export async function createDispatchBooking(data: {
 }) {
   const admin = await requireAdmin();
   if (!admin) throw new Error('Forbidden: admin only');
+  if (!data.provider_id) throw new Error('اختر مزوّداً أولاً');
   try {
     // When dispatching an existing customer request, update that row so the
     // original PENDING request does not linger and get dispatched twice.
     if (data.request_id) {
       const updated = await query(`
         UPDATE bookings
-        SET provider_id = $1, status = 'DISPATCHED', updated_at = NOW()
+        SET provider_id = $1,
+            status = 'DISPATCHED',
+            provider_response = 'PENDING',
+            provider_response_deadline = NOW() + INTERVAL '2 hours',
+            provider_responded_at = NULL,
+            total_price = COALESCE(quoted_price, total_price),
+            notes = COALESCE(NULLIF($3, ''), notes),
+            updated_at = NOW()
         WHERE id = $2 AND status = 'PENDING'
         RETURNING *
-      `, [data.provider_id, data.request_id]);
+      `, [data.provider_id, data.request_id, data.notes ?? '']);
       if (updated.length === 0) {
         throw new Error('Request is no longer pending');
       }
-      if (data.provider_id) {
+      const assigned = updated[0];
+      await insertNotification({
+        user_id: data.provider_id,
+        type: 'dispatch',
+        message: 'تم إسناد مهمة جديدة إليك. لديك ساعتان للقبول أو الاعتذار.',
+        link: '/dashboard/provider',
+      });
+      if (assigned.client_id && String(assigned.client_id) !== String(data.provider_id)) {
         await insertNotification({
-          user_id: data.provider_id,
-          type: 'dispatch',
-          message: 'تم إرسال أمر عمل جديد إليك',
+          user_id: String(assigned.client_id),
+          type: 'status_update',
+          message: 'تم تعيين مزوّد لطلبك، بانتظار تأكيده.',
+          link: '/dashboard/client',
         });
       }
-      return updated[0];
+      await insertBookingEvent(
+        String(assigned.id),
+        admin.id,
+        'ADMIN',
+        'assigned',
+        'تم تعيين مزوّد للطلب'
+      );
+      return assigned;
     }
 
     const rows = await query(`
       INSERT INTO bookings
-        (client_id, provider_id, status, service_type, urgency, wilaya, notes, created_at)
+        (client_id, provider_id, status, service_type, urgency, wilaya, notes,
+         provider_response, provider_response_deadline, created_at, updated_at)
       VALUES
         (COALESCE($1, (SELECT id FROM profiles WHERE role = 'ADMIN' LIMIT 1)),
-         $2, 'DISPATCHED', $3, $4, $5, $6, NOW())
+         $1, 'DISPATCHED', $2, $3, $4, $5, 'PENDING', NOW() + INTERVAL '2 hours', NOW(), NOW())
       RETURNING *
     `, [
-      data.provider_id, // $1 — client_id (COALESCE falls back to admin profile)
-      data.provider_id, // $2 — provider_id (nullable)
+      data.provider_id,
       data.service_type,
       data.urgency,
       data.wilaya,
       data.notes ?? null,
     ]);
-    if (data.provider_id) {
+    if (rows[0]) {
       await insertNotification({
         user_id: data.provider_id,
         type: 'dispatch',
-        message: 'تم إرسال أمر عمل جديد إليك',
+        message: 'تم إرسال أمر عمل جديد إليك. لديك ساعتان للقبول أو الاعتذار.',
+        link: '/dashboard/provider',
       });
+      await insertBookingEvent(
+        String(rows[0].id),
+        admin.id,
+        'ADMIN',
+        'created',
+        'أنشأت الإدارة أمر عمل مباشر'
+      );
     }
     return rows[0];
   } catch (error) {
@@ -601,11 +632,15 @@ export async function createDispatchBooking(data: {
 export async function getDispatchHistory(limit = 30) {
   const admin = await requireAdmin();
   if (!admin) return [];
+  await releaseExpiredAssignments();
   try {
     const rows = await query(`
       SELECT
         b.id, b.service_type, b.urgency, b.wilaya, b.status, b.notes, b.task,
-        b.created_at,
+        b.commune, b.budget_min, b.budget_max, b.preferred_date, b.attachments,
+        b.offer_status, b.quoted_price, b.offer_message, b.payment_status,
+        b.cancellation_reason, b.cancelled_by, b.provider_response,
+        b.provider_response_deadline, b.created_at,
         p.full_name    AS provider_name,
         p.avatar_url   AS provider_avatar,
         p.is_verified  AS provider_verified
@@ -625,6 +660,21 @@ export async function getDispatchHistory(limit = 30) {
       status:        r.status as string,
       notes:         r.notes as string | null,
       task:          (r.task as string | null) ?? null,
+      commune:       (r.commune as string | null) ?? null,
+      budget_min:    r.budget_min !== null && r.budget_min !== undefined ? Number(r.budget_min) : null,
+      budget_max:    r.budget_max !== null && r.budget_max !== undefined ? Number(r.budget_max) : null,
+      preferred_date: r.preferred_date ? new Date(r.preferred_date as string).toISOString().slice(0, 10) : null,
+      attachments:   (r.attachments as string[] | null) ?? [],
+      offer_status:  (r.offer_status as string | null) ?? 'NONE',
+      quoted_price:  r.quoted_price !== null && r.quoted_price !== undefined ? Number(r.quoted_price) : null,
+      offer_message: (r.offer_message as string | null) ?? null,
+      payment_status: (r.payment_status as string | null) ?? 'UNPAID',
+      cancellation_reason: (r.cancellation_reason as string | null) ?? null,
+      cancelled_by:  (r.cancelled_by as string | null) ?? null,
+      provider_response: (r.provider_response as string | null) ?? 'NONE',
+      provider_response_deadline: r.provider_response_deadline
+        ? new Date(r.provider_response_deadline as string).toISOString()
+        : null,
       created_at:    r.created_at ? new Date(r.created_at as string).toISOString() : new Date().toISOString(),
       provider: r.provider_name
         ? {
@@ -983,6 +1033,7 @@ export async function getCurrentUserProfile() {
 export async function getClientBookings() {
   const user = await getCurrentUser();
   if (!user) throw new Error('Not authenticated');
+  await releaseExpiredAssignments();
   const rows = await query(`
     SELECT b.*, p.full_name AS provider_name, p.avatar_url AS provider_avatar, l.title AS listing_title, l.images AS listing_images
     FROM bookings b
@@ -1001,9 +1052,31 @@ export async function getClientBookings() {
     end_date: r.end_date as string | null,
     total_price: Number(r.total_price) || 0,
     notes: r.notes as string | null,
+    task: (r.task as string | null) ?? null,
     service_type: r.service_type as string | null,
     urgency: r.urgency as string | null,
     wilaya: r.wilaya ? Number(r.wilaya) : null,
+    commune: (r.commune as string | null) ?? null,
+    budget_min: r.budget_min !== null && r.budget_min !== undefined ? Number(r.budget_min) : null,
+    budget_max: r.budget_max !== null && r.budget_max !== undefined ? Number(r.budget_max) : null,
+    preferred_date: r.preferred_date ? new Date(r.preferred_date as string).toISOString().slice(0, 10) : null,
+    attachments: (r.attachments as string[] | null) ?? [],
+    offer_status: (r.offer_status as string | null) ?? 'NONE',
+    quoted_price: r.quoted_price !== null && r.quoted_price !== undefined ? Number(r.quoted_price) : null,
+    offer_message: (r.offer_message as string | null) ?? null,
+    offer_sent_at: r.offer_sent_at ? new Date(r.offer_sent_at as string).toISOString() : null,
+    offer_responded_at: r.offer_responded_at
+      ? new Date(r.offer_responded_at as string).toISOString()
+      : null,
+    payment_status: (r.payment_status as string | null) ?? 'UNPAID',
+    payment_method: (r.payment_method as string | null) ?? null,
+    paid_at: r.paid_at ? new Date(r.paid_at as string).toISOString() : null,
+    cancellation_reason: (r.cancellation_reason as string | null) ?? null,
+    cancelled_by: (r.cancelled_by as string | null) ?? null,
+    provider_response: (r.provider_response as string | null) ?? 'NONE',
+    provider_response_deadline: r.provider_response_deadline
+      ? new Date(r.provider_response_deadline as string).toISOString()
+      : null,
     created_at: r.created_at ? new Date(r.created_at as string).toISOString() : new Date().toISOString(),
     profiles: {
       full_name: (r.provider_name as string) || 'مستخدم غير معروف',
@@ -1019,6 +1092,7 @@ export async function getClientBookings() {
 export async function getProviderBookings() {
   const user = await getCurrentUser();
   if (!user) throw new Error('Not authenticated');
+  await releaseExpiredAssignments();
   const rows = await query(`
     SELECT b.*, p.full_name AS client_name, p.avatar_url AS client_avatar, l.title AS listing_title, l.images AS listing_images
     FROM bookings b
@@ -1037,9 +1111,31 @@ export async function getProviderBookings() {
     end_date: r.end_date as string | null,
     total_price: Number(r.total_price) || 0,
     notes: r.notes as string | null,
+    task: (r.task as string | null) ?? null,
     service_type: r.service_type as string | null,
     urgency: r.urgency as string | null,
     wilaya: r.wilaya ? Number(r.wilaya) : null,
+    commune: (r.commune as string | null) ?? null,
+    budget_min: r.budget_min !== null && r.budget_min !== undefined ? Number(r.budget_min) : null,
+    budget_max: r.budget_max !== null && r.budget_max !== undefined ? Number(r.budget_max) : null,
+    preferred_date: r.preferred_date ? new Date(r.preferred_date as string).toISOString().slice(0, 10) : null,
+    attachments: (r.attachments as string[] | null) ?? [],
+    offer_status: (r.offer_status as string | null) ?? 'NONE',
+    quoted_price: r.quoted_price !== null && r.quoted_price !== undefined ? Number(r.quoted_price) : null,
+    offer_message: (r.offer_message as string | null) ?? null,
+    offer_sent_at: r.offer_sent_at ? new Date(r.offer_sent_at as string).toISOString() : null,
+    offer_responded_at: r.offer_responded_at
+      ? new Date(r.offer_responded_at as string).toISOString()
+      : null,
+    payment_status: (r.payment_status as string | null) ?? 'UNPAID',
+    payment_method: (r.payment_method as string | null) ?? null,
+    paid_at: r.paid_at ? new Date(r.paid_at as string).toISOString() : null,
+    cancellation_reason: (r.cancellation_reason as string | null) ?? null,
+    cancelled_by: (r.cancelled_by as string | null) ?? null,
+    provider_response: (r.provider_response as string | null) ?? 'NONE',
+    provider_response_deadline: r.provider_response_deadline
+      ? new Date(r.provider_response_deadline as string).toISOString()
+      : null,
     created_at: r.created_at ? new Date(r.created_at as string).toISOString() : new Date().toISOString(),
     profiles: {
       full_name: (r.client_name as string) || 'زبون غير معروف',
@@ -1065,7 +1161,7 @@ export async function updateBookingStatus(bookingId: string, status: string) {
 
   // Fetch current state to enforce role-based transitions
   const current = await query(
-    'SELECT id, client_id, provider_id, status FROM bookings WHERE id = $1',
+    'SELECT id, client_id, provider_id, status, provider_response FROM bookings WHERE id = $1',
     [bookingId]
   );
   if (current.length === 0) return false;
@@ -1082,6 +1178,17 @@ export async function updateBookingStatus(bookingId: string, status: string) {
   const providerOnly: BookingStatus[] = ['DISPATCHED', 'IN_PROGRESS', 'COMPLETED'];
   if (providerOnly.includes(status as BookingStatus) && !isProvider && !isAdmin) {
     throw new Error('Only the assigned provider can update this status');
+  }
+
+  // A provider must accept the assignment before starting work, otherwise a
+  // dispatcher could think the job is underway while the provider never saw it.
+  if (
+    isProvider &&
+    !isAdmin &&
+    status === 'IN_PROGRESS' &&
+    String(booking.provider_response) !== 'ACCEPTED'
+  ) {
+    throw new Error('يجب قبول المهمة قبل بدء العمل');
   }
 
   // Clients may only withdraw a request that has not started yet. Once a
@@ -1111,12 +1218,26 @@ export async function updateBookingStatus(bookingId: string, status: string) {
     }
   }
 
+  const actorRole = isAdmin ? 'ADMIN' : isProvider ? 'PROVIDER' : 'CLIENT';
+  const cancelReason =
+    status === 'CANCELLED'
+      ? isClient
+        ? 'ألغى العميل الطلب'
+        : isProvider
+        ? 'ألغى المزوّد المهمة'
+        : 'ألغت الإدارة الطلب'
+      : null;
+
   const rows = await query(`
     UPDATE bookings 
-    SET status = $1, updated_at = NOW()
+    SET status = $1,
+        updated_at = NOW(),
+        cancellation_reason = CASE WHEN $1 = 'CANCELLED' THEN COALESCE(cancellation_reason, $5) ELSE cancellation_reason END,
+        cancelled_by = CASE WHEN $1 = 'CANCELLED' THEN COALESCE(cancelled_by, $6) ELSE cancelled_by END
     WHERE id = $2 AND ($3::boolean OR provider_id = $4 OR client_id = $4)
     RETURNING *
-  `, [status, bookingId, isAdmin, user.id]);
+  `, [status, bookingId, isAdmin, user.id, cancelReason, actorRole]);
+
   if (rows.length > 0) {
     const updated = rows[0];
     const hasClient = updated.client_id && String(updated.client_id) !== user.id;
@@ -1133,8 +1254,33 @@ export async function updateBookingStatus(bookingId: string, status: string) {
         user_id: String(updated.client_id),
         type: 'status_update',
         message,
+        link: '/dashboard/client',
       });
     }
+
+    if (status === 'CANCELLED' && (isProvider || isClient)) {
+      await notifyAdmins(
+        isProvider ? 'ألغى المزوّد مهمة قيد التنفيذ.' : 'ألغى العميل طلبه.',
+        '/admin/dispatch'
+      );
+    }
+
+    if (status === 'CANCELLED' && isClient && updated.provider_id) {
+      await insertNotification({
+        user_id: String(updated.provider_id),
+        type: 'status_update',
+        message: 'ألغى العميل المهمة التي أُسندت إليك.',
+        link: '/dashboard/provider',
+      });
+    }
+
+    await insertBookingEvent(
+      bookingId,
+      user.id,
+      actorRole,
+      `status_${status.toLowerCase()}`,
+      cancelReason || `تحديث الحالة إلى ${status}`
+    );
   }
   return rows.length > 0;
 }
@@ -1349,35 +1495,184 @@ export async function updateUserProfile(data: {
 
 // ── Client Service Requests (from public craftsmen page) ───────────────────────
 
+const REQUEST_URGENCIES = ['normal', 'urgent', 'asap'];
+const MAX_REQUESTS_PER_DAY = 8;
+const DUPLICATE_WINDOW_MINUTES = 10;
+const MAX_ATTACHMENTS = 3;
+
+export type CreateClientRequestResult =
+  | { ok: true; request: { id: string; status: string; created_at: string } }
+  | { ok: false; error: string };
+
 export async function createClientRequest(data: {
   service_type: string;
   urgency: string;
   wilaya: number;
   notes?: string;
   task?: string;
-}) {
+  commune?: string;
+  budget_min?: number | null;
+  budget_max?: number | null;
+  preferred_date?: string | null;
+  attachments?: string[];
+}): Promise<CreateClientRequestResult> {
   const user = await getCurrentUser();
-  if (!user) throw new Error('Not authenticated');
+  if (!user) return { ok: false, error: 'يجب تسجيل الدخول أولاً' };
+
+  const serviceType = String(data.service_type || '').trim();
+  if (!serviceType || serviceType.length > 40) {
+    return { ok: false, error: 'نوع الخدمة غير صالح' };
+  }
+  if (!REQUEST_URGENCIES.includes(data.urgency)) {
+    return { ok: false, error: 'درجة الاستعجال غير صالحة' };
+  }
+  const wilaya = Number(data.wilaya);
+  if (!Number.isInteger(wilaya) || wilaya < 1 || wilaya > 58) {
+    return { ok: false, error: 'اختر ولاية صحيحة' };
+  }
+
+  const notes = data.notes?.trim() || null;
+  if (notes && notes.length > 2000) {
+    return { ok: false, error: 'تفاصيل الطلب طويلة جداً (الحد 2000 حرف)' };
+  }
+  if (serviceType === 'custom' && !notes) {
+    return { ok: false, error: 'اكتب تفاصيل طلبك' };
+  }
+
+  const commune = data.commune?.trim() || null;
+  if (commune && commune.length > 100) {
+    return { ok: false, error: 'اسم البلدية طويل جداً' };
+  }
+
+  const parseBudget = (value: number | null | undefined) => {
+    if (value === null || value === undefined || String(value).trim() === '') return null;
+    const n = Number(value);
+    return Number.isFinite(n) && n >= 0 && n <= 100_000_000 ? n : NaN;
+  };
+  const budgetMin = parseBudget(data.budget_min);
+  const budgetMax = parseBudget(data.budget_max);
+  if (Number.isNaN(budgetMin) || Number.isNaN(budgetMax)) {
+    return { ok: false, error: 'الميزانية غير صالحة' };
+  }
+  if (budgetMin !== null && budgetMax !== null && budgetMax < budgetMin) {
+    return { ok: false, error: 'الحد الأعلى للميزانية يجب أن يكون أكبر من الحد الأدنى' };
+  }
+
+  let preferredDate: string | null = null;
+  if (data.preferred_date) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(data.preferred_date) || Number.isNaN(Date.parse(data.preferred_date))) {
+      return { ok: false, error: 'التاريخ المفضل غير صالح' };
+    }
+    const today = new Date().toISOString().slice(0, 10);
+    if (data.preferred_date < today) {
+      return { ok: false, error: 'لا يمكن اختيار تاريخ في الماضي' };
+    }
+    preferredDate = data.preferred_date;
+  }
+
+  const attachments = Array.isArray(data.attachments)
+    ? data.attachments
+        .map((url) => String(url || '').trim())
+        .filter(Boolean)
+        .slice(0, MAX_ATTACHMENTS)
+    : [];
+  if (attachments.some((url) => url.length > 500 || !url.startsWith('/api/images/'))) {
+    return { ok: false, error: 'مرفق غير صالح' };
+  }
+
   try {
+    // Abuse guard: one client cannot flood the admin queue.
+    const recent = await query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM bookings
+       WHERE client_id = $1 AND created_at > NOW() - INTERVAL '24 hours'`,
+      [user.id]
+    );
+    if (Number(recent[0]?.count ?? 0) >= MAX_REQUESTS_PER_DAY) {
+      return { ok: false, error: 'وصلت إلى الحد الأقصى من الطلبات اليومية. حاول غداً.' };
+    }
+
+    // Deduplicate accidental double-submits of the exact same request.
+    const duplicate = await query<{ id: string }>(
+      `SELECT id FROM bookings
+       WHERE client_id = $1
+         AND status <> 'CANCELLED'
+         AND created_at > NOW() - ($2::int * INTERVAL '1 minute')
+         AND COALESCE(service_type, '') = $3
+         AND COALESCE(wilaya, 0) = $4
+         AND COALESCE(notes, '') = $5
+       LIMIT 1`,
+      [user.id, DUPLICATE_WINDOW_MINUTES, serviceType, wilaya, notes ?? '']
+    );
+    if (duplicate.length > 0) {
+      return {
+        ok: false,
+        error: 'يبدو أنك أرسلت هذا الطلب قبل قليل. انتظر رد الإدارة قبل إرساله مجدداً.',
+      };
+    }
+
     const rows = await query(`
-      INSERT INTO bookings (client_id, provider_id, status, service_type, urgency, wilaya, notes, task, created_at)
-      VALUES ($1, NULL, 'PENDING', $2, $3, $4, $5, $6, NOW())
+      INSERT INTO bookings
+        (client_id, provider_id, status, service_type, urgency, wilaya, notes, task,
+         commune, budget_min, budget_max, preferred_date, attachments, created_at, updated_at)
+      VALUES
+        ($1, NULL, 'PENDING', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
       RETURNING id, status, created_at
-    `, [user.id, data.service_type, data.urgency, data.wilaya, data.notes ?? null, data.task ?? null]);
-    return rows[0];
+    `, [
+      user.id,
+      serviceType,
+      data.urgency,
+      wilaya,
+      notes,
+      data.task?.trim() || null,
+      commune,
+      budgetMin,
+      budgetMax,
+      preferredDate,
+      attachments,
+    ]);
+
+    const request = rows[0];
+    const requestId = String(request.id);
+    await insertBookingEvent(
+      requestId,
+      user.id,
+      user.role ?? 'CLIENT',
+      'created',
+      'تم إنشاء الطلب'
+    );
+    await notifyAdmins(
+      `طلب جديد من عميل${notes ? `: ${notes.slice(0, 90)}` : ''}`,
+      '/admin/dispatch'
+    );
+
+    return {
+      ok: true,
+      request: {
+        id: requestId,
+        status: String(request.status),
+        created_at: request.created_at
+          ? new Date(request.created_at as string).toISOString()
+          : new Date().toISOString(),
+      },
+    };
   } catch (error) {
     console.error('Error creating client request:', error);
-    throw error;
+    return { ok: false, error: 'تعذّر إرسال الطلب. حاول مرة أخرى.' };
   }
 }
 
 export async function getPendingRequests() {
   const admin = await requireAdmin();
   if (!admin) return [];
+  await releaseExpiredAssignments();
   try {
     const rows = await query(`
       SELECT
-        b.id, b.service_type, b.urgency, b.wilaya, b.notes, b.created_at,
+        b.id, b.service_type, b.urgency, b.wilaya, b.notes, b.task,
+        b.commune, b.budget_min, b.budget_max, b.preferred_date, b.attachments,
+        b.offer_status, b.quoted_price, b.offer_message, b.offer_sent_at,
+        b.offer_responded_at, b.payment_status, b.total_price,
+        b.cancellation_reason, b.cancelled_by, b.created_at,
         p.full_name AS client_name,
         p.phone AS client_phone
       FROM bookings b
@@ -1385,19 +1680,45 @@ export async function getPendingRequests() {
       WHERE b.status = 'PENDING'
         AND b.provider_id IS NULL
         AND b.service_type IS NOT NULL
-      ORDER BY b.created_at DESC
+      ORDER BY
+        (b.offer_status = 'ACCEPTED') DESC,
+        CASE b.urgency WHEN 'asap' THEN 0 WHEN 'urgent' THEN 1 ELSE 2 END,
+        b.created_at ASC
     `);
-    return rows.map(r => ({
-      id: r.id as string,
-      service_type: r.service_type as string,
-      urgency: r.urgency as string,
-      wilaya: Number(r.wilaya),
-      notes: r.notes as string | null,
-      created_at: r.created_at ? new Date(r.created_at as string).toISOString() : new Date().toISOString(),
-      client: r.client_name
-        ? { name: r.client_name as string, phone: r.client_phone as string | null }
-        : null,
-    }));
+    return rows.map(r => {
+      const createdAt = r.created_at
+        ? new Date(r.created_at as string).toISOString()
+        : new Date().toISOString();
+      return {
+        id: r.id as string,
+        service_type: r.service_type as string,
+        urgency: r.urgency as string,
+        wilaya: Number(r.wilaya),
+        notes: r.notes as string | null,
+        task: (r.task as string | null) ?? null,
+        commune: (r.commune as string | null) ?? null,
+        budget_min: r.budget_min !== null && r.budget_min !== undefined ? Number(r.budget_min) : null,
+        budget_max: r.budget_max !== null && r.budget_max !== undefined ? Number(r.budget_max) : null,
+        preferred_date: r.preferred_date ? String(r.preferred_date).slice(0, 10) : null,
+        attachments: (r.attachments as string[] | null) ?? [],
+        offer_status: (r.offer_status as string | null) ?? 'NONE',
+        quoted_price: r.quoted_price !== null && r.quoted_price !== undefined ? Number(r.quoted_price) : null,
+        offer_message: (r.offer_message as string | null) ?? null,
+        offer_sent_at: r.offer_sent_at ? new Date(r.offer_sent_at as string).toISOString() : null,
+        offer_responded_at: r.offer_responded_at
+          ? new Date(r.offer_responded_at as string).toISOString()
+          : null,
+        payment_status: (r.payment_status as string | null) ?? 'UNPAID',
+        total_price: r.total_price !== null && r.total_price !== undefined ? Number(r.total_price) : 0,
+        cancellation_reason: (r.cancellation_reason as string | null) ?? null,
+        cancelled_by: (r.cancelled_by as string | null) ?? null,
+        created_at: createdAt,
+        age_minutes: Math.max(0, Math.round((Date.now() - new Date(createdAt).getTime()) / 60000)),
+        client: r.client_name
+          ? { name: r.client_name as string, phone: r.client_phone as string | null }
+          : null,
+      };
+    });
   } catch (error) {
     console.error('Error fetching pending requests:', error);
     // Rethrow: the admin requests panel must be able to tell "loaded, and there
@@ -1413,20 +1734,43 @@ export async function assignRequestToProvider(requestId: string, providerId: str
   try {
     const rows = await query(`
       UPDATE bookings
-      SET provider_id = $1, status = 'DISPATCHED', updated_at = NOW()
+      SET provider_id = $1,
+          status = 'DISPATCHED',
+          provider_response = 'PENDING',
+          provider_response_deadline = NOW() + INTERVAL '2 hours',
+          provider_responded_at = NULL,
+          total_price = COALESCE(quoted_price, total_price),
+          updated_at = NOW()
       WHERE id = $2 AND status = 'PENDING'
-      RETURNING id, status
+      RETURNING *
     `, [providerId, requestId]);
     if (rows.length === 0) {
       // Another admin already claimed it — surface it instead of silently no-op'ing.
       throw new Error('الطلب تم تعيينه مسبقاً من طرف آخر');
     }
+    const assigned = rows[0];
     await insertNotification({
       user_id: providerId,
       type: 'dispatch',
-      message: 'تم إرسال أمر عمل جديد إليك',
+      message: 'تم إسناد مهمة جديدة إليك. لديك ساعتان للقبول أو الاعتذار.',
+      link: '/dashboard/provider',
     });
-    return rows[0];
+    if (assigned.client_id && String(assigned.client_id) !== String(providerId)) {
+      await insertNotification({
+        user_id: String(assigned.client_id),
+        type: 'status_update',
+        message: 'تم تعيين مزوّد لطلبك، بانتظار تأكيده.',
+        link: '/dashboard/client',
+      });
+    }
+    await insertBookingEvent(
+      String(assigned.id),
+      admin.id,
+      'ADMIN',
+      'assigned',
+      'تم تعيين مزوّد للطلب'
+    );
+    return assigned;
   } catch (error) {
     console.error('Error assigning request:', error);
     throw error;
@@ -1435,39 +1779,429 @@ export async function assignRequestToProvider(requestId: string, providerId: str
 
 /**
  * Lets the admin decline a request that cannot be fulfilled (or is invalid),
- * so it stops occupying the pending queue.
+ * so it stops occupying the pending queue. The client receives the reason.
  */
 export async function declineRequest(requestId: string, reason?: string) {
   const admin = await requireAdmin();
   if (!admin) throw new Error('Forbidden: admin only');
+  const cleanReason = reason?.trim().slice(0, 1000) || null;
   const rows = await query(`
     UPDATE bookings
     SET status = 'CANCELLED',
-        notes = COALESCE(notes, '') || $2,
+        cancellation_reason = COALESCE($2, 'رفضت الإدارة الطلب'),
+        cancelled_by = 'ADMIN',
+        offer_status = CASE WHEN offer_status = 'OFFERED' THEN 'DECLINED' ELSE offer_status END,
         updated_at = NOW()
     WHERE id = $1 AND status = 'PENDING'
-    RETURNING id, status
-  `, [
-    requestId,
-    reason ? `\n[رفض من الإدارة] ${reason}` : '\n[رفض من الإدارة]',
-  ]);
-  return rows[0] ?? null;
+    RETURNING *
+  `, [requestId, cleanReason]);
+  const declined = rows[0];
+  if (declined) {
+    if (declined.client_id) {
+      await insertNotification({
+        user_id: String(declined.client_id),
+        type: 'status_update',
+        message: cleanReason
+          ? `تم رفض طلبك من الإدارة. السبب: ${cleanReason}`
+          : 'تم رفض طلبك من الإدارة. يمكنك تعديله وإرساله مجدداً.',
+        link: '/dashboard/client',
+      });
+    }
+    await insertBookingEvent(
+      String(declined.id),
+      admin.id,
+      'ADMIN',
+      'declined',
+      cleanReason ? `رفض الطلب: ${cleanReason}` : 'رفض الطلب'
+    );
+  }
+  return declined ?? null;
 }
 
 /**
  * Lets the admin cancel a work order they previously dispatched, since a
  * mis-assignment is otherwise irreversible from the UI.
  */
-export async function cancelDispatch(bookingId: string) {
+export async function cancelDispatch(bookingId: string, reason?: string) {
   const admin = await requireAdmin();
   if (!admin) throw new Error('Forbidden: admin only');
+  const cleanReason = reason?.trim().slice(0, 1000) || 'ألغت الإدارة أمر العمل';
   const rows = await query(`
     UPDATE bookings
-    SET status = 'CANCELLED', updated_at = NOW()
+    SET status = 'CANCELLED',
+        cancellation_reason = COALESCE($2, 'ألغت الإدارة أمر العمل'),
+        cancelled_by = 'ADMIN',
+        updated_at = NOW()
     WHERE id = $1 AND status IN ('DISPATCHED', 'IN_PROGRESS')
-    RETURNING id, status
+    RETURNING *
+  `, [bookingId, cleanReason]);
+  const cancelled = rows[0];
+  if (cancelled) {
+    if (cancelled.client_id) {
+      await insertNotification({
+        user_id: String(cancelled.client_id),
+        type: 'status_update',
+        message: `تم إلغاء أمر العمل من الإدارة. السبب: ${cleanReason}`,
+        link: '/dashboard/client',
+      });
+    }
+    if (cancelled.provider_id) {
+      await insertNotification({
+        user_id: String(cancelled.provider_id),
+        type: 'status_update',
+        message: `تم إلغاء أمر العمل من الإدارة. السبب: ${cleanReason}`,
+        link: '/dashboard/provider',
+      });
+    }
+    await insertBookingEvent(
+      String(cancelled.id),
+      admin.id,
+      'ADMIN',
+      'cancelled',
+      cleanReason
+    );
+  }
+  return cancelled ?? null;
+}
+
+/** Admin sends a price/quotation (or an alternative proposal) to the client. */
+export async function sendOffer(requestId: string, price: number, message?: string) {
+  const admin = await requireAdmin();
+  if (!admin) throw new Error('Forbidden: admin only');
+  const numericPrice = Number(price);
+  if (!Number.isFinite(numericPrice) || numericPrice <= 0) {
+    throw new Error('أدخل سعراً صحيحاً');
+  }
+  const cleanMessage = message?.trim().slice(0, 1000) || null;
+  const rows = await query(`
+    UPDATE bookings
+    SET quoted_price = $2,
+        offer_message = $3,
+        offer_status = 'OFFERED',
+        offer_sent_at = NOW(),
+        offer_responded_at = NULL,
+        updated_at = NOW()
+    WHERE id = $1 AND status = 'PENDING'
+    RETURNING *
+  `, [requestId, Math.round(numericPrice * 100) / 100, cleanMessage]);
+  const offered = rows[0];
+  if (!offered) throw new Error('لا يمكن تقديم عرض لهذا الطلب في حالته الحالية');
+  if (offered.client_id) {
+    await insertNotification({
+      user_id: String(offered.client_id),
+      type: 'offer',
+      message: `قدّمت الإدارة عرضاً بقيمة ${Number(offered.quoted_price).toLocaleString('ar-DZ')} دج لطلبك.${
+        cleanMessage ? ` ${cleanMessage}` : ''
+      }`,
+      link: '/dashboard/client',
+    });
+  }
+  await insertBookingEvent(
+    String(offered.id),
+    admin.id,
+    'ADMIN',
+    'offer_sent',
+    `عرض بسعر ${Number(offered.quoted_price)} دج`
+  );
+  return offered;
+}
+
+/** Client accepts or declines the admin's quotation. */
+export async function respondToOffer(bookingId: string, accept: boolean) {
+  const user = await getCurrentUser();
+  if (!user) throw new Error('Not authenticated');
+  const current = await query(`
+    SELECT id, client_id, status, offer_status, quoted_price
+    FROM bookings WHERE id = $1
   `, [bookingId]);
+  const offer = current[0];
+  if (!offer || String(offer.client_id) !== user.id) throw new Error('Forbidden');
+  // An offer can still be answered after dispatch: admins may assign a provider
+  // before the client replies, and the quotation remains binding.
+  if (
+    (offer.status !== 'PENDING' && offer.status !== 'DISPATCHED') ||
+    offer.offer_status !== 'OFFERED'
+  ) {
+    throw new Error('لا يوجد عرض نشط لهذا الطلب');
+  }
+  const rows = await query(`
+    UPDATE bookings
+    SET offer_status = $2,
+        offer_responded_at = NOW(),
+        updated_at = NOW()
+    WHERE id = $1
+    RETURNING *
+  `, [bookingId, accept ? 'ACCEPTED' : 'DECLINED']);
+  await insertBookingEvent(
+    bookingId,
+    user.id,
+    'CLIENT',
+    accept ? 'offer_accepted' : 'offer_declined',
+    accept ? 'قبل العميل عرض الإدارة' : 'رفض العميل عرض الإدارة'
+  );
+  await notifyAdmins(
+    accept
+      ? `قبل العميل عرضاً بقيمة ${Number(offer.quoted_price).toLocaleString('ar-DZ')} دج.`
+      : 'رفض العميل عرض الإدارة.',
+    '/admin/dispatch'
+  );
   return rows[0] ?? null;
+}
+
+/** Records the (simulated) payment confirmation for an accepted offer. */
+export async function recordPayment(bookingId: string, method: string) {
+  const user = await getCurrentUser();
+  if (!user) throw new Error('Not authenticated');
+  const allowedMethods = ['cash', 'card', 'transfer', 'baridi'];
+  if (!allowedMethods.includes(method)) throw new Error('طريقة الدفع غير صالحة');
+  const current = await query(`
+    SELECT id, client_id, status, offer_status, quoted_price, payment_status
+    FROM bookings WHERE id = $1
+  `, [bookingId]);
+  const booking = current[0];
+  if (!booking || String(booking.client_id) !== user.id) throw new Error('Forbidden');
+  if (booking.offer_status !== 'ACCEPTED') throw new Error('يجب قبول العرض قبل الدفع');
+  if (!booking.quoted_price || Number(booking.quoted_price) <= 0) {
+    throw new Error('لا يوجد مبلغ محدد للدفع');
+  }
+  if (booking.payment_status === 'PAID') return { ok: true, alreadyPaid: true };
+  if (!['PENDING', 'DISPATCHED'].includes(String(booking.status))) {
+    throw new Error('لا يمكن الدفع في هذه المرحلة');
+  }
+  await query(`
+    UPDATE bookings
+    SET payment_status = 'PAID',
+        payment_method = $2,
+        paid_at = NOW(),
+        total_price = quoted_price,
+        updated_at = NOW()
+    WHERE id = $1
+  `, [bookingId, method]);
+  await insertBookingEvent(
+    bookingId,
+    user.id,
+    'CLIENT',
+    'payment_recorded',
+    `تم تسجيل الدفع (${method})`
+  );
+  await notifyAdmins(
+    `تم تسجيل دفع ${Number(booking.quoted_price).toLocaleString('ar-DZ')} دج لطلب مخصص.`,
+    '/admin/dispatch'
+  );
+  return { ok: true, alreadyPaid: false };
+}
+
+/** Client cancels a request before work starts. */
+export async function cancelClientRequest(bookingId: string, reason?: string) {
+  const user = await getCurrentUser();
+  if (!user) throw new Error('Not authenticated');
+  const cleanReason = reason?.trim().slice(0, 1000) || 'ألغى العميل الطلب';
+  const rows = await query(`
+    UPDATE bookings
+    SET status = 'CANCELLED',
+        cancellation_reason = $3,
+        cancelled_by = 'CLIENT',
+        offer_status = CASE WHEN offer_status = 'OFFERED' THEN 'DECLINED' ELSE offer_status END,
+        updated_at = NOW()
+    WHERE id = $1
+      AND client_id = $2
+      AND status IN ('PENDING', 'DISPATCHED')
+    RETURNING *
+  `, [bookingId, user.id, cleanReason]);
+  const cancelled = rows[0];
+  if (!cancelled) throw new Error('لا يمكن إلغاء هذا الطلب في حالته الحالية');
+  await insertBookingEvent(
+    bookingId,
+    user.id,
+    'CLIENT',
+    'cancelled',
+    cleanReason
+  );
+  await notifyAdmins(
+    `ألغى العميل طلباً${cancelled.service_type === 'custom' ? ' مخصصاً' : ''}.`,
+    '/admin/dispatch'
+  );
+  if (cancelled.provider_id) {
+    await insertNotification({
+      user_id: String(cancelled.provider_id),
+      type: 'status_update',
+      message: 'ألغى العميل المهمة التي أُسندت إليك.',
+      link: '/dashboard/provider',
+    });
+  }
+  return cancelled;
+}
+
+/** Client re-submits a rejected/cancelled request as a fresh pending request. */
+export async function resubmitRequest(bookingId: string) {
+  const user = await getCurrentUser();
+  if (!user) throw new Error('Not authenticated');
+  const current = await query(`
+    SELECT * FROM bookings WHERE id = $1 AND client_id = $2
+  `, [bookingId, user.id]);
+  const old = current[0];
+  if (!old) throw new Error('الطلب غير موجود');
+  if (old.status !== 'CANCELLED') throw new Error('يمكن إعادة إرسال الطلبات الملغاة فقط');
+
+  const preferredDate =
+    old.preferred_date && String(old.preferred_date).slice(0, 10) >= new Date().toISOString().slice(0, 10)
+      ? String(old.preferred_date).slice(0, 10)
+      : null;
+
+  const rows = await query(`
+    INSERT INTO bookings
+      (client_id, provider_id, status, service_type, urgency, wilaya, notes, task,
+       commune, budget_min, budget_max, preferred_date, attachments, created_at, updated_at)
+    VALUES
+      ($1, NULL, 'PENDING', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
+    RETURNING id, status, created_at
+  `, [
+    user.id,
+    old.service_type,
+    old.urgency,
+    old.wilaya,
+    old.notes,
+    old.task,
+    old.commune,
+    old.budget_min,
+    old.budget_max,
+    preferredDate,
+    old.attachments ?? [],
+  ]);
+  const created = rows[0];
+  await insertBookingEvent(
+    String(created.id),
+    user.id,
+    'CLIENT',
+    'created',
+    'أُعيد إرسال طلب ملغى'
+  );
+  await notifyAdmins('أعاد عميل إرسال طلب كان مرفوضاً أو ملغى.', '/admin/dispatch');
+  return created;
+}
+
+/** Full audit timeline for a request, visible to its client/provider/admin. */
+export async function getRequestTimeline(bookingId: string) {
+  const user = await getCurrentUser();
+  if (!user) return [];
+  const booking = await query(`
+    SELECT client_id, provider_id FROM bookings WHERE id = $1
+  `, [bookingId]);
+  if (booking.length === 0) return [];
+  const row = booking[0];
+  const allowed =
+    user.role === 'ADMIN' ||
+    String(row.client_id) === user.id ||
+    String(row.provider_id) === user.id;
+  if (!allowed) return [];
+  const events = await query(`
+    SELECT e.id, e.action, e.message, e.actor_role, e.created_at, p.full_name AS actor_name
+    FROM booking_events e
+    LEFT JOIN profiles p ON e.actor_id = p.id
+    WHERE e.booking_id = $1
+    ORDER BY e.created_at ASC
+  `, [bookingId]);
+  return events.map((event) => ({
+    id: String(event.id),
+    action: String(event.action),
+    message: (event.message as string | null) ?? null,
+    actor_role: (event.actor_role as string | null) ?? null,
+    actor_name: (event.actor_name as string | null) ?? null,
+    created_at: event.created_at
+      ? new Date(event.created_at as string).toISOString()
+      : new Date().toISOString(),
+  }));
+}
+
+/** Provider accepts or declines an assignment within the response window. */
+export async function respondToAssignment(bookingId: string, accept: boolean) {
+  const user = await getCurrentUser();
+  if (!user) throw new Error('Not authenticated');
+  const current = await query(`
+    SELECT id, client_id, provider_id, status, provider_response,
+           provider_response_deadline, service_type, quoted_price
+    FROM bookings WHERE id = $1
+  `, [bookingId]);
+  const booking = current[0];
+  if (!booking || String(booking.provider_id) !== user.id) throw new Error('Forbidden');
+  if (booking.status !== 'DISPATCHED') throw new Error('لم تعد هذه المهمة متاحة');
+
+  const deadline = booking.provider_response_deadline
+    ? new Date(booking.provider_response_deadline as string)
+    : null;
+  if (deadline && deadline.getTime() < Date.now()) {
+    await releaseExpiredAssignments();
+    throw new Error('انتهت مهلة الرد على هذه المهمة');
+  }
+
+  if (accept) {
+    await query(`
+      UPDATE bookings
+      SET provider_response = 'ACCEPTED',
+          provider_responded_at = NOW(),
+          updated_at = NOW()
+      WHERE id = $1
+    `, [bookingId]);
+    await insertBookingEvent(
+      bookingId,
+      user.id,
+      'PROVIDER',
+      'provider_accepted',
+      'قبل المزوّد المهمة'
+    );
+    await notifyAdmins('قبل المزوّد مهمة مُسندة إليه.', '/admin/dispatch');
+    if (booking.client_id) {
+      await insertNotification({
+        user_id: String(booking.client_id),
+        type: 'status_update',
+        message: 'قبل المزوّد طلبك وسيبدأ العمل قريباً.',
+        link: '/dashboard/client',
+      });
+    }
+    return { ok: true, accepted: true };
+  }
+
+  const rows = await query(`
+    UPDATE bookings
+    SET status = 'PENDING',
+        provider_id = NULL,
+        provider_response = 'DECLINED',
+        provider_responded_at = NOW(),
+        updated_at = NOW()
+    WHERE id = $1
+    RETURNING *
+  `, [bookingId]);
+  const released = rows[0];
+  await insertBookingEvent(
+    bookingId,
+    user.id,
+    'PROVIDER',
+    'provider_declined',
+    'اعتذر المزوّد عن المهمة'
+  );
+  await notifyAdmins('اعتذر المزوّد عن مهمة. أعد تعيينها.', '/admin/dispatch');
+  if (booking.client_id) {
+    await insertNotification({
+      user_id: String(booking.client_id),
+      type: 'status_update',
+      message: 'تعذّر على المزوّد تنفيذ طلبك، وجارٍ تعيين مزوّد بديل.',
+      link: '/dashboard/client',
+    });
+  }
+  return { ok: true, accepted: false, released: Boolean(released) };
+}
+
+/** Count shown as a badge next to the admin dispatch link. */
+export async function getAdminPendingCount() {
+  const admin = await requireAdmin();
+  if (!admin) return 0;
+  await releaseExpiredAssignments();
+  const rows = await query<{ count: string }>(`
+    SELECT COUNT(*)::text AS count
+    FROM bookings
+    WHERE status = 'PENDING' AND provider_id IS NULL AND service_type IS NOT NULL
+  `);
+  return Number(rows[0]?.count ?? 0);
 }
 
 // ── Notifications ──────────────────────────────────────────────
@@ -1483,11 +2217,123 @@ async function insertNotification(notifData: {
   type: string;
   message: string;
   listing_id?: string;
+  link?: string;
 }) {
   await query(`
-    INSERT INTO notifications (user_id, type, message, listing_id, is_read, created_at)
-    VALUES ($1, $2, $3, $4, false, NOW())
-  `, [notifData.user_id, notifData.type, notifData.message, notifData.listing_id || null]);
+    INSERT INTO notifications (user_id, type, message, listing_id, link, is_read, created_at)
+    VALUES ($1, $2, $3, $4, $5, false, NOW())
+  `, [
+    notifData.user_id,
+    notifData.type,
+    notifData.message,
+    notifData.listing_id || null,
+    notifData.link || null,
+  ]);
+}
+
+/** Notify every admin. Failures must never block the underlying action. */
+async function notifyAdmins(message: string, link?: string) {
+  try {
+    const admins = await query<{ id: string }>(`SELECT id FROM profiles WHERE role = 'ADMIN'`);
+    await Promise.all(
+      admins.map((admin) =>
+        insertNotification({
+          user_id: String(admin.id),
+          type: 'admin_alert',
+          message,
+          link,
+        })
+      )
+    );
+  } catch (error) {
+    console.error('Error notifying admins:', error);
+  }
+}
+
+/** Internal, unguarded audit-trail writer. Call only after authorization. */
+async function insertBookingEvent(
+  bookingId: string,
+  actorId: string | null,
+  actorRole: string | null,
+  action: string,
+  message?: string
+) {
+  try {
+    await query(`
+      INSERT INTO booking_events (booking_id, actor_id, actor_role, action, message)
+      VALUES ($1, $2, $3, $4, $5)
+    `, [bookingId, actorId, actorRole, action, message || null]);
+  } catch (error) {
+    console.error('Error inserting booking event:', error);
+  }
+}
+
+/**
+ * Returns assignments whose provider response window elapsed back to the
+ * pending queue so the admin can reassign them. Runs on read paths, which keeps
+ * the queue healthy without a separate cron process.
+ */
+async function releaseExpiredAssignments() {
+  try {
+    const expired = await query<{
+      id: string;
+      client_id: string | null;
+      provider_id: string;
+      service_type: string | null;
+    }>(`
+      WITH due AS (
+        SELECT id, client_id, provider_id, service_type
+        FROM bookings
+        WHERE status = 'DISPATCHED'
+          AND provider_response = 'PENDING'
+          AND provider_response_deadline IS NOT NULL
+          AND provider_response_deadline < NOW()
+        FOR UPDATE SKIP LOCKED
+      )
+      UPDATE bookings b
+      SET status = 'PENDING',
+          provider_id = NULL,
+          provider_response = 'EXPIRED',
+          provider_responded_at = NOW(),
+          updated_at = NOW()
+      FROM due
+      WHERE b.id = due.id
+      RETURNING b.id, due.client_id, due.provider_id, due.service_type
+    `);
+
+    for (const row of expired) {
+      const bookingId = String(row.id);
+      await insertBookingEvent(
+        bookingId,
+        null,
+        'SYSTEM',
+        'provider_timeout',
+        'انتهت مهلة رد المزوّد وأُعيد الطلب إلى قائمة الانتظار'
+      );
+      await notifyAdmins(
+        'انتهت مهلة رد مزوّد على طلب. أعد تعيينه من قائمة الطلبات.',
+        '/admin/dispatch'
+      );
+      if (row.client_id) {
+        await insertNotification({
+          user_id: String(row.client_id),
+          type: 'status_update',
+          message: 'انتهت مهلة المزوّد، وسيتم تعيين مزوّد آخر لطلبك.',
+          link: '/dashboard/client',
+        });
+      }
+      if (row.provider_id) {
+        await insertNotification({
+          user_id: String(row.provider_id),
+          type: 'status_update',
+          message: 'انتهت مهلة الرد على المهمة، وتم سحبها منك.',
+          link: '/dashboard/provider',
+        });
+      }
+    }
+  } catch (error) {
+    console.error('Error releasing expired assignments:', error);
+  }
 }
 
 /**
@@ -1657,6 +2503,7 @@ export async function updateSiteConfig(partial: Partial<SiteConfig>) {
 export async function getAdminStats() {
   const admin = await requireAdmin();
   if (!admin) throw new Error('Forbidden: admin only');
+  await releaseExpiredAssignments();
 
   const [totals] = await query<{
     total_users: string;
@@ -1666,6 +2513,9 @@ export async function getAdminStats() {
     new_users_7d: string;
     new_listings_7d: string;
     revenue_30d: string | null;
+    pending_requests: string;
+    pending_custom_requests: string;
+    avg_response_minutes: string;
   }>(`
     SELECT
       (SELECT COUNT(*) FROM profiles)::text AS total_users,
@@ -1675,7 +2525,16 @@ export async function getAdminStats() {
       (SELECT COUNT(*) FROM profiles WHERE created_at >= NOW() - INTERVAL '7 days')::text AS new_users_7d,
       (SELECT COUNT(*) FROM listings WHERE created_at >= NOW() - INTERVAL '7 days')::text AS new_listings_7d,
       (SELECT COALESCE(SUM(total_price), 0) FROM bookings
-        WHERE status = 'COMPLETED' AND created_at >= NOW() - INTERVAL '30 days')::text AS revenue_30d
+        WHERE status = 'COMPLETED' AND created_at >= NOW() - INTERVAL '30 days')::text AS revenue_30d,
+      (SELECT COUNT(*) FROM bookings
+        WHERE status = 'PENDING' AND provider_id IS NULL AND service_type IS NOT NULL)::text AS pending_requests,
+      (SELECT COUNT(*) FROM bookings
+        WHERE status = 'PENDING' AND provider_id IS NULL AND service_type = 'custom')::text AS pending_custom_requests,
+      (SELECT COALESCE(ROUND(AVG(EXTRACT(EPOCH FROM (e.created_at - b.created_at)) / 60)), 0)
+        FROM booking_events e
+        JOIN bookings b ON b.id = e.booking_id
+        WHERE e.action = 'assigned'
+          AND e.created_at >= NOW() - INTERVAL '30 days')::text AS avg_response_minutes
   `);
 
   // Per-day activity for the last 7 days, including days with no rows so the
@@ -1697,6 +2556,9 @@ export async function getAdminStats() {
     revenue30d: Number(totals?.revenue_30d ?? 0),
     newUsers7d: Number(totals?.new_users_7d ?? 0),
     newListings7d: Number(totals?.new_listings_7d ?? 0),
+    pendingRequests: Number(totals?.pending_requests ?? 0),
+    pendingCustomRequests: Number(totals?.pending_custom_requests ?? 0),
+    avgResponseMinutes: Number(totals?.avg_response_minutes ?? 0),
     daily: daily.map((r) => ({
       name: r.day,
       users: Number(r.users),
