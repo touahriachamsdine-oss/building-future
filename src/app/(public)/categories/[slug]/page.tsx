@@ -19,6 +19,7 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import { WILAYAS, getWilayaName } from "@/lib/wilayas";
 import { getListings, createClientRequest, createWasteListing, type Listing } from "@/lib/db";
 import { saveImages, rollbackImages } from "@/app/actions/images";
+import { prepareImages } from "@/lib/image-storage";
 import PaymentStep from "@/components/ui/PaymentStep";
 import { getCurrentUser } from "@/lib/auth";
 
@@ -1534,7 +1535,7 @@ export default function CategoryPage() {
                             setWasteError("يرجى إدخال كمية صالحة");
                             return;
                           }
-                          const res = await saveImages(wasteFiles, 'waste');
+                          const res = await saveImages(await prepareImages(wasteFiles), 'waste');
                           if (!res.ok) {
                             setWasteError(res.error);
                             return;

@@ -38,12 +38,16 @@ function extensionFor(mime: string): string {
 export async function persistImages(files: File[], prefix: string): Promise<string[]> {
   assertValidImageSet(files);
 
+  // The prefix is only a label, but it is client-supplied, so keep it to a
+  // plain folder-like token.
+  const safePrefix = /^[a-z0-9-]{1,32}$/i.test(prefix) ? prefix : 'uploads';
+
   const prepared = await Promise.all(
     files.map(async (file) => {
       const id = crypto.randomUUID();
       return {
         id,
-        storagePath: `${prefix}/${id}.${extensionFor(file.type)}`,
+        storagePath: `${safePrefix}/${id}.${extensionFor(file.type)}`,
         mimeType: file.type,
         size: file.size,
         buffer: Buffer.from(await file.arrayBuffer()),

@@ -9,6 +9,7 @@ import { useState, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { saveImages, rollbackImages } from "@/app/actions/images";
+import { prepareImages } from "@/lib/image-storage";
 import { useRouter } from "next/navigation";
 import { createListing } from "@/lib/db";
 import { WILAYAS } from "@/lib/wilayas";
@@ -73,7 +74,7 @@ export default function NewListingPage() {
   const uploadImages = async (): Promise<string[]> => {
     setUploading(true);
     try {
-      const res = await saveImages(selectedFiles, 'listings');
+      const res = await saveImages(await prepareImages(selectedFiles), 'listings');
       if (!res.ok) throw new Error(res.error);
       return res.urls;
     } finally {

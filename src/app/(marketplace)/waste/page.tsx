@@ -27,6 +27,7 @@ import { useState, useEffect, useRef } from "react";
 import { getWasteListings, createWasteListing } from "@/lib/db";
 import PaymentStep from "@/components/ui/PaymentStep";
 import { saveImages, rollbackImages } from "@/app/actions/images";
+import { prepareImages } from "@/lib/image-storage";
 import Link from "next/link";
 import { getWilayaName, WILAYAS } from "@/lib/wilayas";
 
@@ -123,7 +124,7 @@ export default function WasteMarketplace() {
   };
 
   const uploadImages = async (): Promise<string[]> => {
-    const res = await saveImages(selectedFiles, 'waste');
+    const res = await saveImages(await prepareImages(selectedFiles), 'waste');
     if (!res.ok) throw new Error(res.error);
     return res.urls;
   };

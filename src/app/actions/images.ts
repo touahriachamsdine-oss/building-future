@@ -2,6 +2,7 @@
 
 import { persistImages, deleteImages } from '@/lib/image-storage.server';
 import { ImageValidationError } from '@/lib/image-storage';
+import { getCurrentUser } from '@/lib/auth';
 
 export type ImageUploadResult =
   | { ok: true; urls: string[] }
@@ -19,6 +20,11 @@ export type ImageUploadResult =
  */
 export async function saveImages(files: File[], prefix: string): Promise<ImageUploadResult> {
   try {
+    // A server action is a public endpoint: without this check anyone could
+    // push megabytes of arbitrary bytes into the image table anonymously.
+    const user = await getCurrentUser();
+    if (!user) return { ok: false, error: 'يجب تسجيل الدخول أولاً' };
+
     return { ok: true, urls: await persistImages(files, prefix) };
   } catch (err) {
     if (err instanceof ImageValidationError) {

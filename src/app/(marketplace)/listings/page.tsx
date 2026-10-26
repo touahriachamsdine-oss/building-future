@@ -18,7 +18,7 @@ import { getWilayaName, WILAYAS } from "@/lib/wilayas";
 import { getListings, createClientRequest } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
 import { saveImages, rollbackImages } from "@/app/actions/images";
-import { MAX_IMAGE_BYTES } from "@/lib/image-storage";
+import { MAX_IMAGE_BYTES, prepareImages } from "@/lib/image-storage";
 
 interface Listing {
   id: string;
@@ -252,7 +252,7 @@ export default function ListingsPage() {
 
       let uploadedUrls: string[] = [];
       if (requestFiles.length > 0) {
-        const upload = await saveImages(requestFiles, "requests");
+        const upload = await saveImages(await prepareImages(requestFiles), "requests");
         if (!upload.ok) {
           setRequestError(upload.error);
           return;
