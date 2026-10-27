@@ -27,7 +27,11 @@ import { useState, useEffect, useRef } from "react";
 import { getWasteListings, createWasteListing } from "@/lib/db";
 import PaymentStep from "@/components/ui/PaymentStep";
 import { saveImages, rollbackImages } from "@/app/actions/images";
-import { prepareImages } from "@/lib/image-storage";
+import {
+  assertValidImage,
+  prepareImages,
+  MAX_IMAGES_PER_REQUEST,
+} from "@/lib/image-storage";
 import Link from "next/link";
 import { getWilayaName, WILAYAS } from "@/lib/wilayas";
 
@@ -109,16 +113,27 @@ export default function WasteMarketplace() {
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
-    if (files.length + selectedFiles.length > 5) {
-      alert("يمكنك رفع 5 صور كحد أقصى");
+    e.target.value = "";
+    if (files.length + selectedFiles.length > MAX_IMAGES_PER_REQUEST) {
+      alert(`يمكنك رفع ${MAX_IMAGES_PER_REQUEST} صور كحد أقصى`);
       return;
     }
+    // Reject bad files at selection time so the user is not told about a
+    // format or size problem only after filling the rest of the form.
+    try {
+      files.forEach(assertValidImage);
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : "ملف غير صالح");
+      return;
+    }
+    setFormError("");
     const newPreviews = files.map(file => URL.createObjectURL(file));
     setPreviews(prev => [...prev, ...newPreviews]);
     setSelectedFiles(prev => [...prev, ...files]);
   };
 
   const removeFile = (index: number) => {
+    URL.revokeObjectURL(previews[index]);
     setSelectedFiles(prev => prev.filter((_, i) => i !== index));
     setPreviews(prev => prev.filter((_, i) => i !== index));
   };
@@ -140,7 +155,10 @@ export default function WasteMarketplace() {
       wilaya: "1",
     });
     setSelectedFiles([]);
-    setPreviews([]);
+    setPreviews((prev) => {
+      prev.forEach((url) => URL.revokeObjectURL(url));
+      return [];
+    });
     setFormError("");
     setFormSuccess(false);
   };
@@ -298,6 +316,22 @@ export default function WasteMarketplace() {
                   >
                     <Card className="border-2 border-border hover:border-emerald-500 transition-all group overflow-hidden bg-card shadow-sm hover:shadow-md">
                        <CardContent className="p-0">
+                          {item.images?.length > 0 && (
+                            <div className="relative h-40 w-full border-b border-border bg-muted">
+                              <NextImage
+                                src={item.images[0]}
+                                alt={item.type}
+                                fill
+                                sizes="(max-width: 768px) 100vw, 50vw"
+                                className="object-cover"
+                              />
+                              {item.images.length > 1 && (
+                                <span className="absolute bottom-2 left-2 rounded-md bg-black/60 px-2 py-0.5 text-[11px] font-bold text-white">
+                                  +{item.images.length - 1} صور
+                                </span>
+                              )}
+                            </div>
+                          )}
                           <div className="p-6 space-y-6">
                              <div className="flex justify-between items-start">
                                 <div className="space-y-1">
@@ -534,7 +568,7 @@ export default function WasteMarketplace() {
                             </button>
                           </div>
                         ))}
-                        {previews.length < 5 && (
+                        {previews.length < MAX_IMAGES_PER_REQUEST && (
                           <button
                             onClick={() => fileInputRef.current?.click()}
                             className="w-20 h-20 rounded-xl border-2 border-dashed border-border bg-background flex flex-col items-center justify-center gap-1 hover:border-primary/50 transition-colors"
