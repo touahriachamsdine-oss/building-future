@@ -602,10 +602,10 @@ export default function ListingsPage() {
           ) : (
             <div className="p-6 bg-primary/10 rounded-2xl border border-primary/20 space-y-4">
               <h4 className="font-bold text-primary">هل لديك طلب مخصص؟</h4>
-              <p className="text-sm text-primary/80">أرسل طلبك الآن وسيتولى فريق الإدارة توفير ما تحتاجه.</p>
+              <p className="text-sm text-primary/80">اطلب الآن وسيتولى فريق الإدارة توفير ما تحتاجه.</p>
               <Button variant="brutal" className="w-full mt-4" onClick={openRequestModal}>
                 <Send size={16} className="ml-2" />
-                أرسل طلبك الآن
+                اطلب الآن
               </Button>
             </div>
           )}

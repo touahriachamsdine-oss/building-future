@@ -466,6 +466,33 @@ export default function CategoryPage() {
       </div>
 
       <div className="container mx-auto px-4 py-12">
+        {/* Request Service CTA — sits above the filters so it is the first thing
+            a visitor sees, on mobile and desktop alike. */}
+        {!showRequestModal && (
+          <section className="bg-gradient-to-br from-emerald-500/10 via-background to-background border-2 border-emerald-500/20 rounded-3xl p-8 flex flex-col md:flex-row items-center justify-between gap-6 mb-12">
+            <div className="space-y-2 text-center md:text-right">
+              <h3 className="text-2xl font-black text-foreground">
+                {slug === 'craftsmen' ? 'تحتاج حرفي؟' : 'ماذا تحتاج؟'}
+              </h3>
+              <p className="text-muted-foreground">
+                {slug === 'craftsmen'
+                  ? 'اختر نوع الخدمة التي تحتاجها وسنرسل طلبك إلى أمهر الحرفيين'
+                  : 'أخبرنا بما تبحث عنه وسنجده لك'
+                }
+              </p>
+            </div>
+            <Button
+              variant="brutal"
+              size="lg"
+              className="shrink-0 gap-2 whitespace-nowrap cursor-pointer"
+              onClick={() => requireAuth(() => setShowRequestModal(true))}
+            >
+              <Send size={18} />
+              اطلب الآن
+            </Button>
+          </section>
+        )}
+
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-12">
           {/* Sidebar Filters */}
           <aside className="lg:col-span-1 space-y-8 lg:sticky lg:top-24 lg:z-20 lg:max-h-[calc(100dvh-7rem)] lg:overflow-y-auto lg:overscroll-contain lg:pe-1">
@@ -565,32 +592,6 @@ export default function CategoryPage() {
 
           {/* Main Content */}
           <main className="lg:col-span-3 space-y-12">
-            {/* Request Service CTA — all pages */}
-            {!showRequestModal && (
-              <section className="bg-gradient-to-br from-emerald-500/10 via-background to-background border-2 border-emerald-500/20 rounded-3xl p-8 flex flex-col md:flex-row items-center justify-between gap-6">
-                <div className="space-y-2 text-center md:text-right">
-                  <h3 className="text-2xl font-black text-foreground">
-                    {slug === 'craftsmen' ? 'تحتاج حرفي؟' : 'ماذا تحتاج؟'}
-                  </h3>
-                  <p className="text-muted-foreground">
-                    {slug === 'craftsmen'
-                      ? 'اختر نوع الخدمة التي تحتاجها وسنرسل طلبك إلى أمهر الحرفيين'
-                      : 'أخبرنا بما تبحث عنه وسنجده لك'
-                    }
-                  </p>
-                </div>
-                <Button
-                  variant="brutal"
-                  size="lg"
-                  className="shrink-0 gap-2 whitespace-nowrap cursor-pointer"
-                  onClick={() => requireAuth(() => setShowRequestModal(true))}
-                >
-                  <Send size={18} />
-                  اطلب الآن
-                </Button>
-              </section>
-            )}
-
             {/* Category Search Bar (hidden on craftsmen) */}
             {category && slug !== 'craftsmen' && (
               <div className="flex flex-col gap-3 w-full items-end bg-card border-2 border-border p-6 rounded-2xl shadow-md" dir="rtl">
