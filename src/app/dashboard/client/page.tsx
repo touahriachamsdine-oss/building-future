@@ -450,21 +450,8 @@ export default function ClientCommandPanel() {
   return (
     <div className="min-h-screen space-y-8 text-right" dir="rtl">
 
-      {/* ── Header ─────────────────────────────────────────────── */}
-      <div className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-[var(--card)] to-[var(--secondary)] border border-[var(--border)] p-8">
-        <div className="absolute inset-0 diagonal-bg opacity-5" />
-        <div className="relative z-10">
-          <p className="text-xs font-bold uppercase tracking-widest text-[var(--primary)] mb-2">لوحة الطلبات</p>
-          <h1 className="text-3xl font-black text-[var(--foreground)]">اختر الخدمة التي تحتاجها</h1>
-          <p className="text-[var(--muted)] mt-2 text-sm leading-relaxed">
-            انقر على الأيقونة المناسبة لطلب الخدمة — لا حاجة للكتابة
-          </p>
-        </div>
-      </div>
-
       {/* ── Service Icon Grid ───────────────────────────────────── */}
       <div>
-        <h2 className="text-sm font-bold text-[var(--muted)] uppercase tracking-wider mb-5">الخدمات المتاحة</h2>
         <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-4">
           {SERVICES.map((service, i) => {
             const Icon = service.icon;
