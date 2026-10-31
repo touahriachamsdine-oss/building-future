@@ -33,6 +33,8 @@ import {
   MAX_IMAGES_PER_REQUEST,
 } from "@/lib/image-storage";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { getCurrentUser } from "@/lib/auth";
 import { getWilayaName, WILAYAS } from "@/lib/wilayas";
 
 const WASTE_TYPES = [
@@ -61,6 +63,7 @@ interface WasteListing {
 }
 
 export default function WasteMarketplace() {
+  const router = useRouter();
   const [selectedType, setSelectedType] = useState('all');
   const [selectedWilaya, setSelectedWilaya] = useState<string>("all");
   const [listings, setListings] = useState<WasteListing[]>([]);
@@ -139,9 +142,26 @@ export default function WasteMarketplace() {
   };
 
   const uploadImages = async (): Promise<string[]> => {
-    const res = await saveImages(await prepareImages(selectedFiles), 'waste');
+    if (!selectedFiles || selectedFiles.length === 0) return [];
+    const formData = new FormData();
+    formData.append('prefix', 'waste');
+    const compressed = await prepareImages(selectedFiles);
+    for (const file of compressed) {
+      formData.append('files', file);
+    }
+    const res = await saveImages(formData);
     if (!res.ok) throw new Error(res.error);
     return res.urls;
+  };
+
+  const handleOpenForm = async () => {
+    const user = await getCurrentUser();
+    if (!user) {
+      router.push('/login');
+      return;
+    }
+    resetForm();
+    setShowForm(true);
   };
 
   const resetForm = () => {
@@ -164,6 +184,11 @@ export default function WasteMarketplace() {
   };
 
   const handleSubmit = async () => {
+    const user = await getCurrentUser();
+    if (!user) {
+      router.push('/login');
+      return;
+    }
     setSubmitting(true);
     setFormError("");
 
@@ -220,7 +245,7 @@ export default function WasteMarketplace() {
                <Link href="/dashboard/provider/messages">
                 <Button variant="brutal" size="lg">اطلب خدمة نقل</Button>
                </Link>
-               <Button variant="outline" className="border-border hover:bg-muted font-bold" size="lg" onClick={() => { resetForm(); setShowForm(true); }}>أضف نفايات للتبادل</Button>
+               <Button variant="outline" className="border-border hover:bg-muted font-bold" size="lg" onClick={handleOpenForm}>أضف نفايات للتبادل</Button>
             </div>
           </div>
           <div className="hidden lg:flex justify-center">

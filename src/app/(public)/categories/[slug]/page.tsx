@@ -10,7 +10,7 @@ import {
   Filter, SlidersHorizontal, MapPin, 
   Star, Clock, ShieldCheck, X, History, Sparkles, Trash2, Loader2,
   Send, CheckCircle2, AlertCircle, Building2, Droplets, Zap, PaintBucket, Layers, Wrench,
-  Upload,
+  Upload, Recycle, Shovel, HardHat,
 } from "lucide-react";
 import Link from "next/link";
 import Image from "next/image";
@@ -164,6 +164,272 @@ const CATEGORIES_DATA = {
   }
 };
 
+// Services tailored dynamically based on where user accessed the page
+const SERVICES_BY_CATEGORY: Record<string, Array<{
+  id: string;
+  icon: React.ComponentType<{ size?: number; className?: string }>;
+  label: string;
+  desc: string;
+}>> = {
+  "building-materials": [
+    { id: "cement_sand",        icon: Package,     label: "إسمنت، رمل وحصى",         desc: "مواد البناء الأساسية والخرسانة" },
+    { id: "steel_iron",         icon: Layers,      label: "حديد التسليح والمعادن",   desc: "حديد البناء والشبك الملحوم" },
+    { id: "bricks_blocks",      icon: Building2,   label: "آجر، طوب وهوردي",         desc: "آجر أحمر، بلوك خرساني وهوردي" },
+    { id: "paints_coatings",    icon: PaintBucket, label: "دهانات ومواد عزل",        desc: "طلاء مائي وزيتي وعوازل مائية وحرارية" },
+    { id: "plumbing_supplies",  icon: Droplets,    label: "مواد السباكة والترصيص",   desc: "أنابيب، محابس، خزانات وسخانات" },
+    { id: "electrical_supplies",icon: Zap,         label: "تجهيزات ومواد كهربائية",  desc: "كابلات، قواطع، مآخذ وإضاءة" },
+    { id: "wood_aluminum",      icon: Hammer,      label: "أخشاب وألمنيوم وزجاج",    desc: "خشب كوفراج، ألواح وزجاج عازل" },
+    { id: "tiles_ceramic",      icon: Wrench,      label: "سيراميك وبلاط ورخام",     desc: "أرضيات، جدران، رخام ولواصق" },
+  ],
+  "equipment-tools": [
+    { id: "concrete_mixers",    icon: Truck,       label: "آلات الخرسانة والخلط",    desc: "خلاطات، هزازات ومضخات خرسانة" },
+    { id: "heavy_machinery",    icon: Shovel,      label: "آليات ثقيلة وحفر",        desc: "حفارات، جرافات، شاحنات ومدحلات" },
+    { id: "scaffolding_props",  icon: Building2,   label: "سقالات وقوالب معدنية",    desc: "سقالات واجهات ودعامات معدنية" },
+    { id: "power_tools",        icon: Wrench,      label: "أدوات كهروميكانيكية",     desc: "هيلتي، صواريخ قص، مناشير ولحام" },
+    { id: "generators_pumps",   icon: Zap,         label: "مولدات كهربائية ومضخات",  desc: "مولدات ديزل وبنزين ومضخات مياه" },
+    { id: "lifting_transport",  icon: HardHat,     label: "معدات الرفع والتحميل",    desc: "ونش أسطح، روافع وشاحنات برافعة" },
+  ],
+  "craftsmen": [
+    { id: "masonry",            icon: Building2,   label: "بناء وتشييد",             desc: "بناء الجدران، الواجهات والخرسانة" },
+    { id: "plumbing",           icon: Droplets,    label: "سباكة وترصيص صحي",        desc: "تركيب وصيانة شبكات المياه والصرف" },
+    { id: "electricity",        icon: Zap,         label: "كهرباء معمارية وعامة",    desc: "تمديد الأسلاك، القواطع والإنارة" },
+    { id: "painting",           icon: PaintBucket, label: "دهان وديكور داخلي",       desc: "طلاء جدران، أسقف وتأثيرات عصرية" },
+    { id: "carpentry",          icon: Hammer,      label: "نجارة خشب وألمنيوم",      desc: "مطابخ، خزائن، أبواب وشبابيك" },
+    { id: "tiling",             icon: Layers,      label: "تبليط وسيراميك ورخام",    desc: "تركيب السيراميك، البورسلان والرخام" },
+    { id: "ironwork",           icon: Wrench,      label: "حدادة وتلحيم وهياكل",     desc: "أبواب حديد، أسوار ومظلات معدنية" },
+  ],
+  "waste-recycling": [
+    { id: "debris_removal",     icon: Trash2,      label: "رفع ونقل ردم البناء",     desc: "إخلاء ردم الهدم ومخلفات الورشات" },
+    { id: "scrap_metal",        icon: Wrench,      label: "شراء وجمع خردة المعادن",  desc: "حديد، نحاس، ألمنيوم ومخلفات معدنية" },
+    { id: "wood_waste",         icon: Hammer,      label: "مخلفات الخشب والأشجار",   desc: "خشب كوفراج تالف، باليت ونشارة" },
+    { id: "plastics_recycling", icon: Recycle,     label: "تدوير البلاستيك والمطاط", desc: "أنابيب، براميل وأغلفة بلاستيكية" },
+    { id: "paper_cardboard",    icon: Layers,      label: "جمع الورق والكرتون",      desc: "كراتين التغليف والأكياس الورقية" },
+  ],
+};
+
+const ALL_SERVICES_LIST = Object.values(SERVICES_BY_CATEGORY).flat();
+
+const TASKS_BY_SERVICE: Record<string, string[]> = {
+  // Building Materials
+  cement_sand: [
+    "إسمنت بورتلاندي 42.5",
+    "إسمنت جيري 32.5",
+    "رمل مغسول (واد)",
+    "حصى بناء 8/15 و 15/25",
+    "خرسانة جاهزة B25",
+    "جير مائي وجبس بناء",
+  ],
+  steel_iron: [
+    "حديد تسليح 12 مم",
+    "حديد تسليح 14 مم",
+    "حديد تسليح 8 مم / 10 مم",
+    "حديد تسليح 16 مم",
+    "شبك ملحوم (Treillis soudé)",
+    "أسلاك ربط ومسامير بناء",
+  ],
+  bricks_blocks: [
+    "آجر أحمر 8 ثقوب",
+    "آجر أحمر 12 ثقب",
+    "هوردي سقف 16 سم",
+    "هوردي سقف 20 سم",
+    "بلوك خرساني (باربان)",
+    "قرميد وتزيين خارجي",
+  ],
+  paints_coatings: [
+    "دهان مائي (فينيل) داخلي",
+    "دهان زيتي لامع / ساتيني",
+    "معجون تسوية وتجهيز (Enduit)",
+    "عازل مائي للأسطح والخزانات",
+    "عازل حراري بوليستيرين",
+    "طلاء واجهات جرافيتو",
+  ],
+  plumbing_supplies: [
+    "أنابيب PPR متعدد الطبقات",
+    "أنابيب PVC صرف صحي",
+    "حنفيات وخلاطات مياه",
+    "خزانات مياه بلاستيكية",
+    "سخانات مياه شمسية / غازية",
+    "مضخات مياه منزلية",
+  ],
+  electrical_supplies: [
+    "كابلات وأسلاك نحاسية بمختلف المقاسات",
+    "لوحات توزيع وقواطع كهربائية",
+    "مفاتيح ومآخذ عصرية",
+    "قنوات وأنابيب تمديد كهربائي",
+    "إنارة LED وسبوتات وأجهزة إضاءة",
+    "محولات وحمايات جهد",
+  ],
+  wood_aluminum: [
+    "خشب كوفراج للبناء",
+    "خشب أحمر وروسيا للنجارة",
+    "ألواح معاكسة MDF وكونتر",
+    "أبواب وشبابيك ألمنيوم جاهزة",
+    "زجاج سيكوريت ومزدوج عازل",
+    "ألواح أليكوبوند للواجهات",
+  ],
+  tiles_ceramic: [
+    "سيراميك أرضيات داخلي",
+    "سيراميك جدران حمامات ومطابخ",
+    "بورسلان عالي الجودة",
+    "رخام طبيعي وغرانيت درج",
+    "غراء بلاط وسيراميك ممتاز",
+    "ترويبة إسمنتية ومواد فواصل",
+  ],
+
+  // Equipment & Tools
+  concrete_mixers: [
+    "خلاطة خرسانة 350 لتر ديزل/كهرباء",
+    "خلاطة خرسانة 500 لتر",
+    "هزاز خرسانة ميكانيكي (Vibreur)",
+    "هليكوبتر تسوية الخرسانة",
+    "مضخة خرسانة متنقلة",
+  ],
+  heavy_machinery: [
+    "حفارة هيدروليكية (Pelle)",
+    "جرافة صغيرة (Bobcat)",
+    "شاحنة قلاب 10/15 طن",
+    "مدحلة دمك التربة (Compacteur)",
+    "تراكتور حفر (Rétrochargeuse)",
+  ],
+  scaffolding_props: [
+    "سقالات واجهات معدنية معتمدة",
+    "دعامات معدنية قابلة للتعديل (Étais)",
+    "ألواح كوفراج معدنية للأسقف",
+    "سلالم ورشات مزدوجة",
+    "أبراج سقالات متحركة بعجلات",
+  ],
+  power_tools: [
+    "هيلتي تكسير وثقب كبير",
+    "صاروخ قص وقرص معدني",
+    "منشار خشب ومعدن دائري",
+    "آلة لحام كهربائي إنفرتر",
+    "كمبروسر هواء ورش طلاء",
+    "مسدس مسامير غازي للخرسانة",
+  ],
+  generators_pumps: [
+    "مولد كهربائي ديزل 15kVA - 30kVA",
+    "مولد بنزين محمول 5kVA - 8kVA",
+    "مضخة تفريغ مياه قذرة وأتربة",
+    "مضخة غاطسة ذات ضغط عالي",
+    "برج إنارة ليلية للمشاريع",
+  ],
+  lifting_transport: [
+    "ونش رفع مواد للأسطح (Treuil)",
+    "رافعة يدوية وسلاسل تحميل",
+    "عربات وترولي نقل يدوية للموقع",
+    "شاحنة مزودة برافعة (Camion Grue)",
+    "أحزمة تثبيت وسلاسل رفع",
+  ],
+
+  // Craftsmen
+  masonry: [
+    "بناء جدار", "ترميم واجهة", "صب خرسانة", "بناء أساسات",
+    "تركيب بلوك", "تجصيص وتمليط", "عزل حراري ورطوبة", "بناء قوس وديكور",
+  ],
+  plumbing: [
+    "تركيب حنفية وخلاط", "تصليح تسريب مياه", "تركيب سخان ماء", "تنظيف وتسليك مجاري",
+    "تمديد شبكة أنابيب", "تصليح وتركيب مرحاض", "تركيب مغسلة وبانيو", "كشف تسربات إلكتروني",
+  ],
+  electricity: [
+    "تمديد شبكة أسلاك", "تصليح أعطال كهربائية", "تركيب مآخذ ومفاتيح", "تركيب لوحة توزيع",
+    "تركيب إنارة وسبوتات", "تركيب جرس وإنترفون", "تمديد كابلات طاقة", "تأريض وحماية",
+  ],
+  painting: [
+    "دهان جدران داخلية", "دهان أسقف وجبس", "ورنيش ودهان خشب", "ديكورات وتأثيرات عصرية",
+    "طلاء واجهات خارجية", "تجديد ومعالجة تشققات", "تركيب ورق جدران", "تطبيق جرافيتو",
+  ],
+  carpentry: [
+    "تفصيل وتركيب مطبخ", "تركيب خزائن ملابس", "تصليح وترميم أثاث", "تركيب أبواب داخلية وخارجية",
+    "تركيب شبابيك ومصاريع", "نجارة عامة وصيانة", "تركيب أرضيات باركيه", "أعمال خشبية مخصصة",
+  ],
+  tiling: [
+    "تبليط أرضيات منازل", "تبليط جدران حمامات ومطابخ", "تركيب سيراميك وبورسلان", "إصلاح واستبدال بلاط",
+    "تركيب رخام وسلالم", "تبليط مسابح وتراسات", "جلي وتلميع رخام", "تبليط خارجي وأحواش",
+  ],
+  ironwork: [
+    "تركيب أسوار وشبائك حماية", "أعمال لحام عامة في الموقع", "تركيب درابزين سلالم", "تفصيل وتركيب أبواب حديد",
+    "شبابيك حديدية أمنية", "تركيب هياكل وسقائف معدنية", "تركيب وتصليح أبواب كراجات", "تصنيع وتثبيت سقالات",
+  ],
+
+  // Waste & Recycling
+  debris_removal: [
+    "رفع ردم هدم وتكسير", "تنظيف مخلفات ورشات البناء", "نقل أتربة حفر وردم",
+    "تأجير وتفريغ حاويات الردم (Benne)", "إخلاء بقايا طوب وإسمنت",
+  ],
+  scrap_metal: [
+    "جمع وشراء حديد تسليح خردة", "شراء نحاس وكابلات قديمة", "شراء ألمنيوم ومقاطع مستعملة",
+    "تقطيع وإزالة هياكل معدنية تالفة", "جمع بطاريات ومحركات قديمة",
+  ],
+  wood_waste: [
+    "رفع خشب كوفراج مستهلك", "جمع منصات خشبية (باليت)", "إخلاء أبواب وإطارات خشبية قديمة",
+    "شراء نشارة وبقايا ورشات نجارة",
+  ],
+  plastics_recycling: [
+    "جمع أنابيب PVC وPPR تالفة", "جمع براميل وأوعية بلاستيكية", "تدوير أكياس الإسمنت والشوائب",
+    "جمع ألواح وصفائح عازلة مستعملة",
+  ],
+  paper_cardboard: [
+    "جمع كراتين تغليف الأجهزة والمواد", "جمع أكياس ومخلفات ورقية", "خدمة جمع دوري للمستودعات",
+  ],
+};
+
+const MODAL_CATEGORY_INFO: Record<string, {
+  title: string;
+  subtitle: string;
+  icon: React.ComponentType<{ size?: number; className?: string }>;
+  color: string;
+}> = {
+  "building-materials": {
+    title: "طلب مواد بناء",
+    subtitle: "حدد المواد والكميات وسنرسل طلبك لأفضل الموردين المعتمدين",
+    icon: Package,
+    color: "text-blue-500",
+  },
+  "equipment-tools": {
+    title: "طلب كراء أو شراء عتاد",
+    subtitle: "حدد المعدات المطلوبة وسنصلك بمؤجري وشركات العتاد",
+    icon: Truck,
+    color: "text-orange-500",
+  },
+  "craftsmen": {
+    title: "طلب خدمة حرفي",
+    subtitle: "اختر نوع الخدمة التي تحتاجها وسنرسل طلبك إلى أمهر الحرفيين",
+    icon: Hammer,
+    color: "text-emerald-500",
+  },
+  "waste-recycling": {
+    title: "طلب رفع وتدوير نفايات",
+    subtitle: "حدد نوع المخلفات والردم وسنرسل شاحنات الرفع والتدوير",
+    icon: Recycle,
+    color: "text-purple-500",
+  },
+};
+
+const CATEGORY_PRICING: Record<string, { amount: number; label: string }> = {
+  "building-materials": { amount: 2500, label: "عربون تأكيد طلب المواد وتوصيلها للموقع" },
+  "equipment-tools": { amount: 3000, label: "عربون حجز العتاد والتنسيق مع المؤجر" },
+  "craftsmen": { amount: 3500, label: "سيتم مراجعة طلبك وإرساله إلى الحرفيين المختصين" },
+  "waste-recycling": { amount: 2000, label: "رسوم تأكيد حجز شاحنة الرفع والتدوير" },
+};
+
+const getCategoryUnitLabel = (catSlug: string) => {
+  switch (catSlug) {
+    case "building-materials": return "صنف متاح";
+    case "equipment-tools": return "معدة متاحة";
+    case "waste-recycling": return "نوع متاح";
+    default: return "مهمة متاحة";
+  }
+};
+
+const getCategoryTaskPrompt = (catSlug: string) => {
+  switch (catSlug) {
+    case "building-materials": return "— اختر المادة أو الصنف المطلوب";
+    case "equipment-tools": return "— اختر نوع العتاد أو الآلة المطلوبة";
+    case "waste-recycling": return "— اختر نوع النفايات أو خدمة الرفع";
+    default: return "— اختر المهمة المطلوبة";
+  }
+};
+
 export default function CategoryPage() {
   const params = useParams();
   const slug = params.slug as string;
@@ -242,9 +508,27 @@ export default function CategoryPage() {
   const [isLoadingListings, setIsLoadingListings] = useState(true);
   const [tebessaListings, setTebessaListings] = useState<Listing[]>([]);
 
-  // Request service state (craftsmen only)
-  const [showRequestModal, setShowRequestModal] = useState(false);
-  const [reqService, setReqService] = useState<string | null>(null);
+  // Request service state (dynamic across categories)
+  const [categoryOverride, setCategoryOverride] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    const p = new URLSearchParams(window.location.search);
+    const fromParam = p.get("from") || p.get("category");
+    return fromParam && SERVICES_BY_CATEGORY[fromParam] ? fromParam : null;
+  });
+  const activeCategorySlug = categoryOverride || slug;
+
+  const [showRequestModal, setShowRequestModal] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    const p = new URLSearchParams(window.location.search);
+    return p.get("request") === "1" || p.get("request") === "true" || !!p.get("service");
+  });
+
+  const [reqService, setReqService] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    const p = new URLSearchParams(window.location.search);
+    return p.get("service") || null;
+  });
+
   const [reqTask, setReqTask] = useState<string | null>(null);
   const [reqUrgency, setReqUrgency] = useState("normal");
   const [reqWilaya, setReqWilaya] = useState("1");
@@ -253,7 +537,6 @@ export default function CategoryPage() {
   const [reqSent, setReqSent] = useState(false);
   const [reqError, setReqError] = useState("");
   const [showCraftPayment, setShowCraftPayment] = useState(false);
-  const CRAFT_PRICE = 3500;
 
   // Waste pickup state (waste-recycling only)
   const [showWasteModal, setShowWasteModal] = useState(false);
@@ -292,46 +575,7 @@ export default function CategoryPage() {
     { id: "other", label: "أخرى" },
   ];
 
-  const REQ_SERVICES = [
-    { id: "masonry",     icon: Building2,   label: "بناء وتشييد" },
-    { id: "plumbing",    icon: Droplets,    label: "سباكة" },
-    { id: "electricity", icon: Zap,         label: "كهرباء" },
-    { id: "painting",    icon: PaintBucket, label: "دهان وطلاء" },
-    { id: "carpentry",   icon: Hammer,      label: "نجارة" },
-    { id: "tiling",      icon: Layers,      label: "تبليط" },
-    { id: "ironwork",    icon: Wrench,      label: "حدادة" },
-  ];
 
-  const TASKS_BY_SERVICE: Record<string, string[]> = {
-    masonry: [
-      "بناء جدار", "ترميم واجهة", "صب خرسانة", "بناء أساسات",
-      "تركيب بلوك", "تجصيص", "عزل حراري", "بناء قوس",
-    ],
-    plumbing: [
-      "تركيب حنفية", "تصليح تسريب", "تركيب سخان ماء", "تنظيف مجاري",
-      "تركيب أنابيب", "تصليح مرحاض", "تركيب مغسلة", "كشف تسربات",
-    ],
-    electricity: [
-      "تركيب أسلاك", "تصليح عطل", "تركيب مأخذ كهربائي", "تركيب لوحة كهربائية",
-      "إنارة", "تركيب جرس", "تمديد كابل", "تصليح فيشة",
-    ],
-    painting: [
-      "دهان جدران", "دهان سقف", "ورنيش خشب", "ديكور داخلي",
-      "دهان خارجي", "تجديد دهان", "ورق جدران", "جرافيتو",
-    ],
-    carpentry: [
-      "تركيب مطبخ", "تركيب خزائن", "تصليح أثاث", "تركيب أبواب",
-      "تركيب شبابيك", "نجارة عامة", "تركيب باركيه", "تصليح خشب",
-    ],
-    tiling: [
-      "تبليط أرضية", "تبليط جدران", "تركيب سيراميك", "إصلاح بلاط",
-      "تركيب رخام", "تبليط حمام", "تبليط مطبخ", "تبليط خارجي",
-    ],
-    ironwork: [
-      "تركيب سور", "لحام", "تركيب درابزين", "أبواب حديد",
-      "شبابيك حديد", "هيكل معدني", "باب كراج", "سقالات حديدية",
-    ],
-  };
 
   const URGENCY_LEVELS = [
     { id: "normal", label: "عادي", color: "text-blue-400", bg: "bg-blue-400/10" },
@@ -469,15 +713,29 @@ export default function CategoryPage() {
         {/* Request Service CTA — sits above the filters so it is the first thing
             a visitor sees, on mobile and desktop alike. */}
         {!showRequestModal && (
-          <section className="bg-gradient-to-br from-emerald-500/10 via-background to-background border-2 border-emerald-500/20 rounded-3xl p-8 flex flex-col md:flex-row items-center justify-between gap-6 mb-12">
+          <section className="bg-gradient-to-br from-primary/10 via-background to-background border-2 border-primary/20 rounded-3xl p-8 flex flex-col md:flex-row items-center justify-between gap-6 mb-12 shadow-sm">
             <div className="space-y-2 text-center md:text-right">
               <h3 className="text-2xl font-black text-foreground">
-                {slug === 'craftsmen' ? 'تحتاج حرفي؟' : 'ماذا تحتاج؟'}
-              </h3>
-              <p className="text-muted-foreground">
                 {slug === 'craftsmen'
-                  ? 'اختر نوع الخدمة التي تحتاجها وسنرسل طلبك إلى أمهر الحرفيين'
-                  : 'أخبرنا بما تبحث عنه وسنجده لك'
+                  ? 'تحتاج حرفي متمرس؟'
+                  : slug === 'building-materials'
+                  ? 'تحتاج مواد بناء لمشروعك؟'
+                  : slug === 'equipment-tools'
+                  ? 'تحتاج كراء أو شراء عتاد؟'
+                  : slug === 'waste-recycling'
+                  ? 'تحتاج رفع أو تدوير نفايات؟'
+                  : 'ماذا تحتاج لمشروعك؟'}
+              </h3>
+              <p className="text-muted-foreground text-sm md:text-base max-w-xl">
+                {slug === 'craftsmen'
+                  ? 'اختر نوع الخدمة التي تحتاجها وسنرسل طلبك إلى أمهر الحرفيين المعتمدين'
+                  : slug === 'building-materials'
+                  ? 'اختر نوع المواد والكميات المطلوبة وسنرسل طلبك إلى أفضل موردي مواد البناء'
+                  : slug === 'equipment-tools'
+                  ? 'اختر الآلات والمعدات المطلوبة وسنصلك بمؤجري وشركات العتاد في منطقتك'
+                  : slug === 'waste-recycling'
+                  ? 'اختر نوع المخلفات وموقع الورشة وسنرسل شاحنات الرفع والتدوير'
+                  : 'أخبرنا بما تبحث عنه وسنربطك بأفضل المزودين والمحترفين'
                 }
               </p>
             </div>
@@ -485,7 +743,12 @@ export default function CategoryPage() {
               variant="brutal"
               size="lg"
               className="shrink-0 gap-2 whitespace-nowrap cursor-pointer"
-              onClick={() => requireAuth(() => setShowRequestModal(true))}
+              onClick={() => requireAuth(() => {
+                setCategoryOverride(null);
+                setReqService(null);
+                setReqTask(null);
+                setShowRequestModal(true);
+              })}
             >
               <Send size={18} />
               اطلب الآن
@@ -848,7 +1111,11 @@ export default function CategoryPage() {
                               exit={{ opacity: 0, scale: 0.9 }}
                               transition={{ duration: 0.2 }}
                               whileHover={{ scale: 1.02, y: -5 }}
-                              whileTap={{ scale: 0.98 }}
+                             onClick={() => {
+                               if (!activeFilters.includes(sub.name)) {
+                                 setActiveFilters(prev => [...prev, sub.name]);
+                               }
+                             }}
                              className="bg-card border-2 border-border hover:border-primary p-4 rounded-2xl text-right transition-all group shadow-md cursor-pointer"
                             >
                               <div className="font-bold text-foreground group-hover:text-primary transition-colors">{sub.name}</div>
@@ -1061,13 +1328,24 @@ export default function CategoryPage() {
               dir="rtl"
             >
               <div className="flex items-center justify-between p-6 border-b border-border">
-                <h3 className="text-xl font-black text-foreground flex items-center gap-2">
-                  <Hammer size={20} className="text-emerald-500" />
-                  {slug === 'craftsmen' ? 'طلب خدمة حرفي' : 'أخبرنا بماذا تبحث'}
-                </h3>
+                {(() => {
+                  const modalInfo = MODAL_CATEGORY_INFO[activeCategorySlug] || MODAL_CATEGORY_INFO["craftsmen"];
+                  const ModalIcon = modalInfo.icon;
+                  return (
+                    <div className="flex items-center gap-3">
+                      <div className={cn("p-2.5 rounded-xl bg-primary/10", modalInfo.color)}>
+                        <ModalIcon size={22} />
+                      </div>
+                      <div>
+                        <h3 className="text-lg font-black text-foreground">{modalInfo.title}</h3>
+                        <p className="text-xs text-muted-foreground">{modalInfo.subtitle}</p>
+                      </div>
+                    </div>
+                  );
+                })()}
                 <button
                   onClick={() => setShowRequestModal(false)}
-                  className="p-1 hover:bg-primary/5 rounded-lg transition-colors"
+                  className="p-1 hover:bg-primary/5 rounded-lg transition-colors cursor-pointer"
                   disabled={reqSubmitting}
                 >
                   <X size={20} className="text-muted-foreground" />
@@ -1077,8 +1355,8 @@ export default function CategoryPage() {
               <div className="p-6 space-y-5">
                 {showCraftPayment ? (
                   <PaymentStep
-                    amount={CRAFT_PRICE}
-                    label="سيتم مراجعة طلبك وإرساله إلى المزودين المختصين"
+                    amount={(CATEGORY_PRICING[activeCategorySlug] || CATEGORY_PRICING["craftsmen"]).amount}
+                    label={(CATEGORY_PRICING[activeCategorySlug] || CATEGORY_PRICING["craftsmen"]).label}
                     onBack={() => setShowCraftPayment(false)}
                     onSuccess={() => { setShowCraftPayment(false); setReqSent(true); }}
                     onConfirm={async () => { await new Promise(r => setTimeout(r, 2000)); }}
@@ -1114,29 +1392,70 @@ export default function CategoryPage() {
 
                     {/* Step 1: Pick Service */}
                     {!reqService && (
-                      <div className="space-y-2">
-                        <label className="block text-sm font-bold text-foreground">اختر نوع الخدمة</label>
+                      <div className="space-y-4">
+                        {/* Category switcher pills — pre-selected based on where accessed */}
+                        <div className="space-y-1.5">
+                          <span className="text-xs font-semibold text-muted-foreground">التصنيف الحالي:</span>
+                          <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-none" dir="rtl">
+                            {[
+                              { id: "building-materials", label: "مواد البناء", icon: Package },
+                              { id: "equipment-tools", label: "العتاد والأدوات", icon: Truck },
+                              { id: "craftsmen", label: "الحرفيون", icon: Hammer },
+                              { id: "waste-recycling", label: "تدوير النفايات", icon: Recycle },
+                            ].map((tab) => {
+                              const TabIcon = tab.icon;
+                              const isTabActive = activeCategorySlug === tab.id;
+                              return (
+                                <button
+                                  key={tab.id}
+                                  type="button"
+                                  onClick={() => {
+                                    setCategoryOverride(tab.id);
+                                    setReqService(null);
+                                    setReqTask(null);
+                                  }}
+                                  className={cn(
+                                    "flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap transition-all border cursor-pointer",
+                                    isTabActive
+                                      ? "bg-primary text-primary-foreground border-primary shadow-sm"
+                                      : "bg-muted/60 text-muted-foreground border-border hover:border-primary/40 hover:text-foreground"
+                                  )}
+                                >
+                                  <TabIcon size={14} />
+                                  {tab.label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+
                         <div className="space-y-2">
-                          {REQ_SERVICES.map(s => {
-                            const Icon = s.icon;
-                            return (
-                              <button
-                                key={s.id}
-                                type="button"
-                                onClick={() => { setReqService(s.id); setReqTask(null); }}
-                                className="w-full flex items-center gap-4 p-4 rounded-xl border-2 border-border bg-background hover:border-primary/50 hover:text-foreground transition-all text-right group"
-                              >
-                                <div className="p-2.5 rounded-xl bg-primary/10 text-primary">
-                                  <Icon size={22} />
-                                </div>
-                                <div className="flex-1">
-                                  <div className="font-bold text-foreground">{s.label}</div>
-                                  <div className="text-xs text-muted-foreground">{TASKS_BY_SERVICE[s.id]?.length || 0} مهمة متاحة</div>
-                                </div>
-                                <ChevronLeft size={18} className="text-muted-foreground group-hover:text-primary transition-colors" />
-                              </button>
-                            );
-                          })}
+                          <label className="block text-sm font-bold text-foreground">اختر نوع الخدمة</label>
+                          <div className="space-y-2 max-h-[50vh] overflow-y-auto pe-1">
+                            {(SERVICES_BY_CATEGORY[activeCategorySlug] || SERVICES_BY_CATEGORY["craftsmen"]).map(s => {
+                              const Icon = s.icon;
+                              return (
+                                <button
+                                  key={s.id}
+                                  type="button"
+                                  onClick={() => { setReqService(s.id); setReqTask(null); }}
+                                  className="w-full flex items-center gap-4 p-4 rounded-xl border-2 border-border bg-background hover:border-primary/50 hover:text-foreground transition-all text-right group cursor-pointer"
+                                >
+                                  <div className="p-2.5 rounded-xl bg-primary/10 text-primary shrink-0">
+                                    <Icon size={22} />
+                                  </div>
+                                  <div className="flex-1 min-w-0">
+                                    <div className="font-bold text-foreground truncate">{s.label}</div>
+                                    <div className="text-xs text-muted-foreground flex items-center gap-2 mt-0.5">
+                                      <span>{TASKS_BY_SERVICE[s.id]?.length || 0} {getCategoryUnitLabel(activeCategorySlug)}</span>
+                                      {s.desc && <span className="hidden sm:inline text-muted-foreground/70">• {s.desc}</span>}
+                                    </div>
+                                  </div>
+                                  <ChevronLeft size={18} className="text-muted-foreground group-hover:text-primary transition-colors shrink-0" />
+                                </button>
+                              );
+                            })}
+                          </div>
                         </div>
                       </div>
                     )}
@@ -1148,7 +1467,7 @@ export default function CategoryPage() {
                         <button
                           type="button"
                           onClick={() => { setReqService(null); setReqTask(null); }}
-                          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors font-medium"
+                          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors font-medium cursor-pointer"
                         >
                           <ChevronLeft size={14} />
                           العودة لاختيار الخدمة
@@ -1157,17 +1476,17 @@ export default function CategoryPage() {
                         {/* Tasks grid */}
                         <div className="space-y-2">
                           <label className="block text-sm font-bold text-foreground">
-                            {REQ_SERVICES.find(s => s.id === reqService)?.label}
-                            <span className="text-muted-foreground font-normal text-xs mr-2">— اختر المهمة المطلوبة</span>
+                            {ALL_SERVICES_LIST.find(s => s.id === reqService)?.label || reqService}
+                            <span className="text-muted-foreground font-normal text-xs mr-2">{getCategoryTaskPrompt(activeCategorySlug)}</span>
                           </label>
-                          <div className="grid grid-cols-2 gap-2">
+                          <div className="grid grid-cols-2 gap-2 max-h-[35vh] overflow-y-auto pe-1">
                             {(TASKS_BY_SERVICE[reqService] || []).map(task => (
                               <button
                                 key={task}
                                 type="button"
                                 onClick={() => setReqTask(reqTask === task ? null : task)}
                                 className={cn(
-                                  "px-4 py-3 rounded-xl border-2 text-sm font-bold transition-all text-right",
+                                  "px-4 py-3 rounded-xl border-2 text-sm font-bold transition-all text-right cursor-pointer",
                                   reqTask === task
                                     ? "bg-primary text-primary-foreground border-primary shadow-md"
                                     : "bg-background border-border text-muted-foreground hover:border-primary/50 hover:text-foreground"
@@ -1326,7 +1645,13 @@ export default function CategoryPage() {
                     amount={2000}
                     label="سيتم مراجعة طلبك وإرساله إلى مزودي الخدمة في منطقتك"
                     onBack={() => setShowWastePayment(false)}
-                    onSuccess={() => { setShowWastePayment(false); setWasteSent(true); }}
+                    onSuccess={() => {
+                      setShowWastePayment(false);
+                      setWasteSent(true);
+                      getListings({ category: 'WASTE' }).then(data => {
+                        if (data) setListings(data as Listing[]);
+                      }).catch(console.error);
+                    }}
                     onConfirm={async () => { await new Promise(r => setTimeout(r, 2000)); }}
                   />
                 ) : wasteSent ? (
@@ -1536,23 +1861,54 @@ export default function CategoryPage() {
                             setWasteError("يرجى إدخال كمية صالحة");
                             return;
                           }
-                          const res = await saveImages(await prepareImages(wasteFiles), 'waste');
+                          const formData = new FormData();
+                          formData.append('prefix', 'waste');
+                          const compressed = await prepareImages(wasteFiles);
+                          for (const file of compressed) {
+                            formData.append('files', file);
+                          }
+                          const res = await saveImages(formData);
                           if (!res.ok) {
                             setWasteError(res.error);
                             return;
                           }
                           imageUrls = res.urls;
-                          const saved = await createWasteListing({
-                            type: wasteForm.type,
-                            waste_type: wasteForm.waste_type,
-                            quantity,
-                            unit: wasteForm.unit,
-                            asking_price: parseFloat(wasteForm.asking_price) || 0,
-                            pickup_available: wasteForm.pickup_available,
+
+                          const wasteTypeLabel = WASTE_TYPES.find(w => w.id === wasteForm.waste_type)?.label || wasteForm.waste_type;
+                          const wasteNotes = `طلب رفع نفايات: ${wasteTypeLabel} | الكمية: ${quantity} ${wasteForm.unit} | السعر: ${wasteForm.asking_price ? `${wasteForm.asking_price} دج` : 'مجاني'} | ${wasteForm.pickup_available ? 'الرفع من الموقع مطلوب' : 'التسليم من الموقع'}`;
+
+                          // 1. Submit client booking request with attachments so it reaches Admin Dispatch & Provider Dashboard & Client Orders
+                          const reqResult = await createClientRequest({
+                            service_type: 'waste-recycling',
+                            urgency: 'urgent',
                             wilaya: parseInt(wasteForm.wilaya),
-                            images: imageUrls,
+                            task: wasteTypeLabel,
+                            notes: wasteNotes,
+                            attachments: imageUrls,
                           });
-                          setWasteRequestId(saved.id as string);
+
+                          if (!reqResult.ok) {
+                            setWasteError(reqResult.error);
+                            return;
+                          }
+
+                          // 2. Also register in waste_listings so it appears in waste marketplace & category listings
+                          try {
+                            await createWasteListing({
+                              type: wasteForm.type,
+                              waste_type: wasteForm.waste_type,
+                              quantity,
+                              unit: wasteForm.unit,
+                              asking_price: parseFloat(wasteForm.asking_price) || 0,
+                              pickup_available: wasteForm.pickup_available,
+                              wilaya: parseInt(wasteForm.wilaya),
+                              images: imageUrls,
+                            });
+                          } catch (listingErr) {
+                            console.warn('[waste] marketplace listing sync notice:', listingErr);
+                          }
+
+                          setWasteRequestId(reqResult.request.id);
                           setShowWastePayment(true);
                         } catch (err) {
                           console.error(err);

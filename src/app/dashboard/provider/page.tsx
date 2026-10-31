@@ -30,6 +30,7 @@ import {
   Wallet,
   CalendarDays,
   Timer,
+  Recycle,
 } from "lucide-react";
 import Image from "next/image";
 import {
@@ -41,20 +42,48 @@ import { getWilayaName } from "@/lib/wilayas";
 
 // ── Service icons map ──────────────────────────────────────────────────────────
 const SERVICE_MAP: Record<string, { icon: React.ElementType; label: string; color: string; grad: string }> = {
-  masonry:     { icon: Building2,    label: "بناء وتشييد",    color: "text-amber-400",   grad: "from-amber-500 to-orange-600" },
-  plumbing:    { icon: Droplets,     label: "سباكة",           color: "text-blue-400",    grad: "from-blue-500 to-cyan-600" },
-  electricity: { icon: Zap,          label: "كهرباء",          color: "text-yellow-400",  grad: "from-yellow-400 to-amber-500" },
-  painting:    { icon: PaintBucket,  label: "دهان وطلاء",    color: "text-pink-400",    grad: "from-pink-500 to-rose-600" },
-  carpentry:   { icon: Hammer,       label: "نجارة",           color: "text-green-400",   grad: "from-green-500 to-emerald-600" },
-  tiling:      { icon: Layers,       label: "تبليط وسيراميك", color: "text-violet-400",  grad: "from-violet-500 to-purple-600" },
-  ironwork:    { icon: Wrench,       label: "حدادة",           color: "text-slate-400",   grad: "from-slate-400 to-slate-600" },
-  excavation:  { icon: Shovel,       label: "حفر وترابية",   color: "text-amber-600",   grad: "from-amber-700 to-amber-900" },
-  transport:   { icon: Truck,        label: "نقل ومواد",      color: "text-sky-400",     grad: "from-sky-500 to-blue-600" },
-  materials:   { icon: Package,      label: "توريد مواد",     color: "text-teal-400",    grad: "from-teal-500 to-green-600" },
-  safety:      { icon: HardHat,      label: "إشراف وسلامة",  color: "text-orange-400",  grad: "from-orange-400 to-red-500" },
-  hvac:        { icon: Thermometer,  label: "تكييف وتدفئة", color: "text-cyan-400",    grad: "from-cyan-400 to-teal-500" },
-  general:     { icon: Wrench,       label: "خدمة عامة",      color: "text-slate-400",   grad: "from-slate-500 to-slate-700" },
-  custom:      { icon: FileText,     label: "طلب مخصص",      color: "text-rose-400",    grad: "from-rose-500 to-pink-600" },
+  // Craftsmen
+  masonry:            { icon: Building2,   label: "بناء وتشييد",       color: "text-amber-400",   grad: "from-amber-500 to-orange-600" },
+  plumbing:           { icon: Droplets,    label: "سباكة وترصيص",      color: "text-blue-400",    grad: "from-blue-500 to-cyan-600" },
+  electricity:        { icon: Zap,         label: "كهرباء معمارية",    color: "text-yellow-400",  grad: "from-yellow-400 to-amber-500" },
+  painting:           { icon: PaintBucket, label: "دهان وديكور",       color: "text-pink-400",    grad: "from-pink-500 to-rose-600" },
+  carpentry:          { icon: Hammer,      label: "نجارة",              color: "text-green-400",   grad: "from-green-500 to-emerald-600" },
+  tiling:             { icon: Layers,      label: "تبليط وسيراميك",    color: "text-violet-400",  grad: "from-violet-500 to-purple-600" },
+  ironwork:           { icon: Wrench,      label: "حدادة وتلحيم",      color: "text-slate-400",   grad: "from-slate-400 to-slate-600" },
+
+  // Building Materials
+  cement_sand:        { icon: Package,     label: "إسمنت ورمل وحصى",   color: "text-teal-400",    grad: "from-teal-500 to-green-600" },
+  steel_iron:         { icon: Layers,      label: "حديد التسليح",       color: "text-slate-400",   grad: "from-slate-500 to-slate-700" },
+  bricks_blocks:      { icon: Building2,   label: "آجر وطوب وهوردي",    color: "text-orange-400",  grad: "from-orange-500 to-red-600" },
+  paints_coatings:    { icon: PaintBucket, label: "دهانات ومواد عزل",   color: "text-pink-400",    grad: "from-pink-500 to-rose-600" },
+  plumbing_supplies:  { icon: Droplets,    label: "تجهيزات السباكة",   color: "text-blue-400",    grad: "from-blue-500 to-cyan-600" },
+  electrical_supplies:{ icon: Zap,         label: "تجهيزات كهربائية",   color: "text-yellow-400",  grad: "from-yellow-400 to-amber-500" },
+  wood_aluminum:      { icon: Hammer,      label: "أخشاب وألمنيوم",     color: "text-emerald-400", grad: "from-emerald-500 to-green-600" },
+  tiles_ceramic:      { icon: Wrench,      label: "سيراميك وبلاط",      color: "text-violet-400",  grad: "from-violet-500 to-purple-600" },
+
+  // Equipment & Tools
+  concrete_mixers:    { icon: Truck,       label: "آلات الخرسانة",      color: "text-amber-400",   grad: "from-amber-500 to-orange-600" },
+  heavy_machinery:    { icon: Shovel,      label: "آليات ثقيلة وحفر",  color: "text-amber-600",   grad: "from-amber-700 to-amber-900" },
+  scaffolding_props:  { icon: Building2,   label: "سقالات وقوالب",      color: "text-blue-400",    grad: "from-blue-600 to-indigo-600" },
+  power_tools:        { icon: Wrench,      label: "أدوات كهروميكانيكية",color: "text-red-400",     grad: "from-red-500 to-orange-600" },
+  generators_pumps:   { icon: Zap,         label: "مولدات ومضخات",      color: "text-yellow-400",  grad: "from-yellow-400 to-amber-500" },
+  lifting_transport:  { icon: HardHat,     label: "معدات الرفع والنقل",color: "text-sky-400",     grad: "from-sky-500 to-blue-600" },
+
+  // Waste & Recycling
+  debris_removal:     { icon: Truck,       label: "رفع ونقل الردم",     color: "text-amber-500",   grad: "from-amber-600 to-yellow-600" },
+  scrap_metal:        { icon: Wrench,      label: "خردة ومعادن",        color: "text-slate-400",   grad: "from-slate-500 to-slate-700" },
+  wood_waste:         { icon: Hammer,      label: "مخلفات الخشب",       color: "text-green-500",   grad: "from-green-600 to-emerald-700" },
+  plastics_recycling: { icon: Recycle,     label: "تدوير البلاستيك",    color: "text-purple-400",  grad: "from-purple-500 to-violet-600" },
+  paper_cardboard:    { icon: Layers,      label: "ورق وكرتون",        color: "text-teal-400",    grad: "from-teal-500 to-cyan-600" },
+
+  // Legacy / General
+  excavation:         { icon: Shovel,      label: "حفر وترابية",       color: "text-amber-600",   grad: "from-amber-700 to-amber-900" },
+  transport:          { icon: Truck,       label: "نقل ومواد",          color: "text-sky-400",     grad: "from-sky-500 to-blue-600" },
+  materials:          { icon: Package,     label: "توريد مواد",         color: "text-teal-400",    grad: "from-teal-500 to-green-600" },
+  safety:             { icon: HardHat,     label: "إشراف وسلامة",      color: "text-orange-400",  grad: "from-orange-400 to-red-500" },
+  hvac:               { icon: Thermometer, label: "تكييف وتدفئة",      color: "text-cyan-400",    grad: "from-cyan-400 to-teal-500" },
+  general:            { icon: Wrench,      label: "خدمة عامة",          color: "text-slate-400",   grad: "from-slate-500 to-slate-700" },
+  custom:             { icon: FileText,    label: "طلب مخصص",          color: "text-rose-400",    grad: "from-rose-500 to-pink-600" },
 };
 
 // ── Urgency config ─────────────────────────────────────────────────────────────

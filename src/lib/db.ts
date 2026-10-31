@@ -356,7 +356,78 @@ export async function getListings(filters?: { category?: string; wilaya?: number
 
     const rows = await query(sql, params);
 
-    if (!rows || rows.length === 0) {
+    // Also fetch waste listings from waste_listings table if category matches
+    let wasteItems: Listing[] = [];
+    const isWasteCategory = filters?.category === 'WASTE';
+    const isAllCategories = !filters?.category || filters.category === 'all' || filters.category === 'الكل';
+    if (isWasteCategory || isAllCategories) {
+      try {
+        let wSql = `
+          SELECT w.*, p.full_name, p.avatar_url, p.rating_avg
+          FROM waste_listings w
+          LEFT JOIN profiles p ON w.user_id = p.id
+          WHERE w.status = 'ACTIVE'
+        `;
+        const wParams: unknown[] = [];
+        if (filters?.wilaya && !isNaN(filters.wilaya)) {
+          wSql += ` AND w.wilaya = $1`;
+          wParams.push(filters.wilaya);
+        }
+        wSql += ` ORDER BY w.created_at DESC`;
+        const wRows = await query(wSql, wParams);
+        if (wRows && wRows.length > 0) {
+          wasteItems = wRows.map((w) => ({
+            id: w.id as string,
+            user_id: w.user_id as string,
+            category: 'WASTE' as const,
+            sub_category: w.waste_type as string,
+            title: `عرض نفايات: ${w.type || w.waste_type}`,
+            description: `الكمية: ${w.quantity} ${w.unit} - ${w.pickup_available ? 'الرفع متاح' : 'التسليم من الموقع'}`,
+            price: Number(w.asking_price) || 0,
+            price_type: (w.unit === 'kg' ? 'kg' : w.unit === 'm3' ? 'm3' : 'fixed') as Listing['price_type'],
+            condition: 'used' as const,
+            wilaya: Number(w.wilaya),
+            images: Array.isArray(w.images) && w.images.length > 0 ? (w.images as string[]) : ['/images/recycling.png'],
+            is_available: true,
+            views_count: 0,
+            created_at: w.created_at ? new Date(w.created_at as string).toISOString() : new Date().toISOString(),
+            profiles: {
+              full_name: (w.full_name as string) || 'مستخدم غير معروف',
+              avatar_url: w.avatar_url as string | undefined,
+              rating_avg: w.rating_avg ? Number(w.rating_avg) : 5.0,
+            },
+          }));
+        }
+      } catch (e) {
+        console.error('Error fetching waste listings in getListings:', e);
+      }
+    }
+
+    const dbListings: Listing[] = (rows || []).map(r => ({
+      id: r.id as string,
+      user_id: r.user_id as string,
+      category: r.category as Listing['category'],
+      sub_category: r.sub_category as string,
+      title: r.title as string,
+      description: r.description as string,
+      price: Number(r.price) || 0,
+      price_type: r.price_type as Listing['price_type'],
+      condition: r.condition as Listing['condition'],
+      wilaya: Number(r.wilaya),
+      images: (r.images as string[]) || [],
+      is_available: Boolean(r.is_available),
+      views_count: Number(r.views_count) || 0,
+      created_at: r.created_at ? new Date(r.created_at as string).toISOString() : new Date().toISOString(),
+      profiles: {
+        full_name: (r.full_name as string) || 'مستخدم غير معروف',
+        avatar_url: r.avatar_url as string | undefined,
+        rating_avg: r.rating_avg ? Number(r.rating_avg) : 5.0
+      }
+    }));
+
+    const combined = isWasteCategory ? [...wasteItems, ...dbListings] : [...dbListings, ...wasteItems];
+
+    if (combined.length === 0) {
       // Return filtered mock listings
       return MOCK_LISTINGS.filter(item => {
         if (filters?.category && filters.category !== 'all' && filters.category !== 'الكل') {
@@ -372,27 +443,7 @@ export async function getListings(filters?: { category?: string; wilaya?: number
       });
     }
 
-    return rows.map(r => ({
-      id: r.id,
-      user_id: r.user_id,
-      category: r.category,
-      sub_category: r.sub_category,
-      title: r.title,
-      description: r.description,
-      price: Number(r.price) || 0,
-      price_type: r.price_type,
-      condition: r.condition,
-      wilaya: r.wilaya,
-      images: r.images || [],
-      is_available: r.is_available,
-      views_count: r.views_count,
-      created_at: r.created_at ? new Date(r.created_at as string).toISOString() : new Date().toISOString(),
-      profiles: {
-        full_name: r.full_name || 'مستخدم غير معروف',
-        avatar_url: r.avatar_url,
-        rating_avg: r.rating_avg ? Number(r.rating_avg) : 5.0
-      }
-    }));
+    return combined;
   } catch (error) {
     console.error('Error fetching listings:', error);
     // Surface the failure as "no results" rather than fabricating listings.

@@ -252,7 +252,13 @@ export default function ListingsPage() {
 
       let uploadedUrls: string[] = [];
       if (requestFiles.length > 0) {
-        const upload = await saveImages(await prepareImages(requestFiles), "requests");
+        const formData = new FormData();
+        formData.append("prefix", "requests");
+        const compressed = await prepareImages(requestFiles);
+        for (const file of compressed) {
+          formData.append("files", file);
+        }
+        const upload = await saveImages(formData);
         if (!upload.ok) {
           setRequestError(upload.error);
           return;

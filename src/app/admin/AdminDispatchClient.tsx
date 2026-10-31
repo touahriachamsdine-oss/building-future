@@ -33,6 +33,8 @@ import {
   Wallet,
   CalendarDays,
   BadgeDollarSign,
+  Trash2,
+  Recycle,
 } from "lucide-react";
 import Image from "next/image";
 import { WILAYAS, getWilayaName } from "@/lib/wilayas";
@@ -62,13 +64,19 @@ const SERVICES = [
   { id: "materials",   icon: Package,     label: "توريد مواد",     grad: "from-teal-500 to-green-600" },
   { id: "safety",      icon: HardHat,     label: "إشراف وسلامة",  grad: "from-orange-400 to-red-500" },
   { id: "hvac",        icon: Thermometer, label: "تكييف وتدفئة",  grad: "from-cyan-400 to-teal-500" },
+  { id: "waste-recycling",    icon: Recycle,     label: "إدارة وتدوير النفايات", grad: "from-emerald-600 to-teal-700" },
+  { id: "debris_removal",     icon: Trash2,      label: "رفع ونقل ردم البناء",   grad: "from-emerald-500 to-green-700" },
+  { id: "scrap_metal",        icon: Wrench,      label: "خردة ومعادن",           grad: "from-zinc-500 to-slate-700" },
+  { id: "wood_waste",         icon: Hammer,      label: "مخلفات الخشب والأشجار", grad: "from-amber-600 to-amber-800" },
+  { id: "plastics_recycling", icon: Recycle,     label: "تدوير البلاستيك والمطاط", grad: "from-teal-500 to-emerald-600" },
+  { id: "paper_cardboard",    icon: Layers,      label: "جمع الورق والكرتون",      grad: "from-blue-600 to-cyan-700" },
   { id: "custom",      icon: FileText,    label: "طلب مخصص",      grad: "from-rose-500 to-pink-600" },
 ];
 
 // Custom requests are not tied to a provider specialty, so the admin must see
 // every provider and choose who fulfils them.
 const specialtyFilter = (serviceType: string | null | undefined) =>
-  serviceType && serviceType !== "custom" ? serviceType : undefined;
+  serviceType && serviceType !== "custom" && serviceType !== "waste-recycling" ? serviceType : undefined;
 
 const SERVICE_MAP = Object.fromEntries(SERVICES.map((s) => [s.id, s]));
 

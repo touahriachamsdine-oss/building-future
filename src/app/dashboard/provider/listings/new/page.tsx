@@ -72,9 +72,16 @@ export default function NewListingPage() {
   };
 
   const uploadImages = async (): Promise<string[]> => {
+    if (!selectedFiles || selectedFiles.length === 0) return [];
     setUploading(true);
     try {
-      const res = await saveImages(await prepareImages(selectedFiles), 'listings');
+      const formData = new FormData();
+      formData.append('prefix', 'listings');
+      const compressed = await prepareImages(selectedFiles);
+      for (const file of compressed) {
+        formData.append('files', file);
+      }
+      const res = await saveImages(formData);
       if (!res.ok) throw new Error(res.error);
       return res.urls;
     } finally {

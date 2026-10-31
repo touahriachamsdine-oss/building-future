@@ -18,12 +18,29 @@ export type ImageUploadResult =
  * server-action boundary in production, which would strip the validation
  * message the user needs to see.
  */
-export async function saveImages(files: File[], prefix: string): Promise<ImageUploadResult> {
+export async function saveImages(
+  input: FormData | File[],
+  prefixParam?: string
+): Promise<ImageUploadResult> {
   try {
     // A server action is a public endpoint: without this check anyone could
     // push megabytes of arbitrary bytes into the image table anonymously.
     const user = await getCurrentUser();
     if (!user) return { ok: false, error: 'يجب تسجيل الدخول أولاً' };
+
+    let files: File[] = [];
+    let prefix = prefixParam || 'uploads';
+
+    if (input instanceof FormData) {
+      files = (input.getAll('files') as File[]).filter((f) => f && typeof f === 'object' && f.size > 0);
+      prefix = (input.get('prefix') as string) || prefix;
+    } else if (Array.isArray(input)) {
+      files = input;
+    }
+
+    if (!files || files.length === 0) {
+      return { ok: true, urls: [] };
+    }
 
     return { ok: true, urls: await persistImages(files, prefix) };
   } catch (err) {
